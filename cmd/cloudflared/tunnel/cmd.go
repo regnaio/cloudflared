@@ -15,6 +15,7 @@ import (
 	"github.com/coreos/go-systemd/daemon"
 	"github.com/facebookgo/grace/gracenet"
 	"github.com/getsentry/raven-go"
+	"github.com/google/uuid"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
@@ -24,7 +25,6 @@ import (
 	"github.com/cloudflare/cloudflared/cfapi"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/proxydns"
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/ui"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/updater"
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
@@ -217,7 +217,7 @@ func runAdhocNamedTunnel(sc *subcommandContext, name, credentialsOutputPath stri
 
 // runClassicTunnel creates a "classic" non-named tunnel
 func runClassicTunnel(sc *subcommandContext) error {
-	return StartServer(sc.c, buildInfo, nil, sc.log, sc.isUIEnabled)
+	return StartServer(sc.c, buildInfo, nil, sc.log)
 }
 
 func routeFromFlag(c *cli.Context) (route cfapi.HostnameRoute, ok bool) {
@@ -235,7 +235,6 @@ func StartServer(
 	info *cliutil.BuildInfo,
 	namedTunnel *connection.NamedTunnelProperties,
 	log *zerolog.Logger,
-	isUIEnabled bool,
 ) error {
 	_ = raven.SetDSN(sentryDSN)
 	var wg sync.WaitGroup
@@ -330,9 +329,9 @@ func StartServer(
 		return fmt.Errorf(errText)
 	}
 
-	logTransport := logger.CreateTransportLoggerFromContext(c, isUIEnabled)
+	logTransport := logger.CreateTransportLoggerFromContext(c, logger.EnableTerminalLog)
 
-	observer := connection.NewObserver(log, logTransport, isUIEnabled)
+	observer := connection.NewObserver(log, logTransport)
 
 	// Send Quick Tunnel URL to UI if applicable
 	var quickTunnelURL string
@@ -347,6 +346,14 @@ func StartServer(
 	if err != nil {
 		log.Err(err).Msg("Couldn't start tunnel")
 		return err
+	}
+	var clientID uuid.UUID
+	if tunnelConfig.NamedTunnel != nil {
+		clientID, err = uuid.FromBytes(tunnelConfig.NamedTunnel.Client.ClientID)
+		if err != nil {
+			// set to nil for classic tunnels
+			clientID = uuid.Nil
+		}
 	}
 
 	orchestrator, err := orchestration.NewOrchestrator(ctx, orchestratorConfig, tunnelConfig.Tags, tunnelConfig.Log)
@@ -363,7 +370,7 @@ func StartServer(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		readinessServer := metrics.NewReadyServer(log)
+		readinessServer := metrics.NewReadyServer(log, clientID)
 		observer.RegisterSink(readinessServer)
 		errC <- metrics.ServeMetrics(metricsListener, ctx.Done(), readinessServer, quickTunnelURL, orchestrator, log)
 	}()
@@ -382,18 +389,6 @@ func StartServer(
 		}()
 		errC <- supervisor.StartTunnelDaemon(ctx, tunnelConfig, orchestrator, connectedSignal, reconnectCh, graceShutdownC)
 	}()
-
-	if isUIEnabled {
-		tunnelUI := ui.NewUIModel(
-			info.Version(),
-			hostname,
-			metricsListener.Addr().String(),
-			orchestratorConfig.Ingress,
-			tunnelConfig.HAConnections,
-		)
-		app := tunnelUI.Launch(ctx, log, logTransport)
-		observer.RegisterSink(app)
-	}
 
 	gracePeriod, err := gracePeriod(c)
 	if err != nil {
@@ -513,6 +508,13 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 			Name:    "region",
 			Usage:   "Cloudflare Edge region to connect to. Omit or set to empty to connect to the global region.",
 			EnvVars: []string{"TUNNEL_REGION"},
+		}),
+		altsrc.NewStringFlag(&cli.StringFlag{
+			Name:    "edge-ip-version",
+			Usage:   "Cloudflare Edge ip address version to connect with. {4, 6, auto}",
+			EnvVars: []string{"TUNNEL_EDGE_IP_VERSION"},
+			Value:   "4",
+			Hidden:  false,
 		}),
 		altsrc.NewStringFlag(&cli.StringFlag{
 			Name:    tlsconfig.CaCertFlag,
@@ -647,9 +649,9 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 		}),
 		altsrc.NewBoolFlag(&cli.BoolFlag{
 			Name:   uiFlag,
-			Usage:  "Launch tunnel UI. Tunnel logs are scrollable via 'j', 'k', or arrow keys.",
+			Usage:  "(depreciated) Launch tunnel UI. Tunnel logs are scrollable via 'j', 'k', or arrow keys.",
 			Value:  false,
-			Hidden: shouldHide,
+			Hidden: true,
 		}),
 		altsrc.NewStringFlag(&cli.StringFlag{
 			Name:   "quick-service",
@@ -820,6 +822,13 @@ func configureProxyFlags(shouldHide bool) []cli.Flag {
 			Usage:   legacyTunnelFlag("Disables chunked transfer encoding; useful if you are running a WSGI server."),
 			EnvVars: []string{"TUNNEL_NO_CHUNKED_ENCODING"},
 			Hidden:  shouldHide,
+		}),
+		altsrc.NewBoolFlag(&cli.BoolFlag{
+			Name:    ingress.Http2OriginFlag,
+			Usage:   "Enables HTTP/2 origin servers.",
+			EnvVars: []string{"TUNNEL_ORIGIN_ENABLE_HTTP2"},
+			Hidden:  shouldHide,
+			Value:   false,
 		}),
 	}
 	return append(flags, sshFlags(shouldHide)...)

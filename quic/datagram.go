@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lucas-clemente/quic-go"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -13,18 +14,14 @@ const (
 )
 
 type DatagramMuxer struct {
-	ID      uuid.UUID
-	session quic.Session
+	session quic.Connection
+	logger  *zerolog.Logger
 }
 
-func NewDatagramMuxer(quicSession quic.Session) (*DatagramMuxer, error) {
-	muxerID, err := uuid.NewRandom()
-	if err != nil {
-		return nil, err
-	}
+func NewDatagramMuxer(quicSession quic.Connection, logger *zerolog.Logger) (*DatagramMuxer, error) {
 	return &DatagramMuxer{
-		ID:      muxerID,
 		session: quicSession,
+		logger:  logger,
 	}, nil
 }
 
@@ -53,7 +50,11 @@ func (dm *DatagramMuxer) ReceiveFrom() (uuid.UUID, []byte, error) {
 	if err != nil {
 		return uuid.Nil, nil, err
 	}
-	return extractSessionID(msg)
+	sessionID, payload, err := extractSessionID(msg)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	return sessionID, payload, nil
 }
 
 // Maximum application payload to send to / receive from QUIC datagram frame

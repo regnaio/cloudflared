@@ -228,6 +228,8 @@ type OriginRequestConfig struct {
 	ProxyType *string `yaml:"proxyType,omitempty" json:"proxyType,omitempty"`
 	// IP rules for the proxy service
 	IPRules []IngressIPRule `yaml:"ipRules,omitempty" json:"ipRules,omitempty"`
+	// Attempt to connect to origin with HTTP/2
+	Http2Origin *bool `yaml:"http2Origin" json:"http2Origin,omitempty"`
 }
 
 type IngressIPRule struct {
@@ -245,7 +247,9 @@ type Configuration struct {
 }
 
 type WarpRoutingConfig struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
+	Enabled        bool            `yaml:"enabled" json:"enabled"`
+	ConnectTimeout *CustomDuration `yaml:"connectTimeout" json:"connectTimeout,omitempty"`
+	TCPKeepAlive   *CustomDuration `yaml:"tcpKeepAlive" json:"tcpKeepAlive,omitempty"`
 }
 
 type configFileSettings struct {

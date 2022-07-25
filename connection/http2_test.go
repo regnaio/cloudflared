@@ -33,12 +33,13 @@ func newTestHTTP2Connection() (*HTTP2Connection, net.Conn) {
 	edgeConn, cfdConn := net.Pipe()
 	var connIndex = uint8(0)
 	log := zerolog.Nop()
-	obs := NewObserver(&log, &log, false)
+	obs := NewObserver(&log, &log)
 	controlStream := NewControlStream(
 		obs,
 		mockConnectedFuse{},
 		&NamedTunnelProperties{},
 		connIndex,
+		nil,
 		nil,
 		nil,
 		1*time.Second,
@@ -176,6 +177,7 @@ func (mc mockNamedTunnelRPCClient) RegisterConnection(
 	properties *NamedTunnelProperties,
 	options *tunnelpogs.ConnectionOptions,
 	connIndex uint8,
+	edgeAddress net.IP,
 	observer *Observer,
 ) (*tunnelpogs.ConnectionDetails, error) {
 	if mc.shouldFail != nil {
@@ -354,12 +356,13 @@ func TestServeControlStream(t *testing.T) {
 		unregistered: make(chan struct{}),
 	}
 
-	obs := NewObserver(&log, &log, false)
+	obs := NewObserver(&log, &log)
 	controlStream := NewControlStream(
 		obs,
 		mockConnectedFuse{},
 		&NamedTunnelProperties{},
 		1,
+		nil,
 		rpcClientFactory.newMockRPCClient,
 		nil,
 		1*time.Second,
@@ -404,12 +407,13 @@ func TestFailRegistration(t *testing.T) {
 		unregistered: make(chan struct{}),
 	}
 
-	obs := NewObserver(&log, &log, false)
+	obs := NewObserver(&log, &log)
 	controlStream := NewControlStream(
 		obs,
 		mockConnectedFuse{},
 		&NamedTunnelProperties{},
 		http2Conn.connIndex,
+		nil,
 		rpcClientFactory.newMockRPCClient,
 		nil,
 		1*time.Second,
@@ -449,13 +453,14 @@ func TestGracefulShutdownHTTP2(t *testing.T) {
 	events := &eventCollectorSink{}
 
 	shutdownC := make(chan struct{})
-	obs := NewObserver(&log, &log, false)
+	obs := NewObserver(&log, &log)
 	obs.RegisterSink(events)
 	controlStream := NewControlStream(
 		obs,
 		mockConnectedFuse{},
 		&NamedTunnelProperties{},
 		http2Conn.connIndex,
+		nil,
 		rpcClientFactory.newMockRPCClient,
 		shutdownC,
 		1*time.Second,

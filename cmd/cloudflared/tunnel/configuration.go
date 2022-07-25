@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
+	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
 
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
@@ -44,7 +45,7 @@ var (
 	secretFlags     = [2]*altsrc.StringFlag{credentialsContentsFlag, tunnelTokenFlag}
 	defaultFeatures = []string{supervisor.FeatureAllowRemoteConfig, supervisor.FeatureSerializedHeaders}
 
-	configFlags = []string{"autoupdate-freq", "no-autoupdate", "retries", "protocol", "loglevel", "transport-loglevel", "origincert", "metrics", "metrics-update-freq"}
+	configFlags = []string{"autoupdate-freq", "no-autoupdate", "retries", "protocol", "loglevel", "transport-loglevel", "origincert", "metrics", "metrics-update-freq", "edge-ip-version"}
 )
 
 // returns the first path that contains a cert.pem file. If none of the DefaultConfigSearchDirectories
@@ -324,6 +325,10 @@ func prepareTunnelConfig(
 		CompressionSetting: h2mux.CompressionSetting(uint64(c.Int("compression-quality"))),
 		MetricsUpdateFreq:  c.Duration("metrics-update-freq"),
 	}
+	edgeIPVersion, err := parseConfigIPVersion(c.String("edge-ip-version"))
+	if err != nil {
+		return nil, nil, err
+	}
 
 	tunnelConfig := &supervisor.TunnelConfig{
 		GracePeriod:     gracePeriod,
@@ -332,6 +337,7 @@ func prepareTunnelConfig(
 		ClientID:        clientID,
 		EdgeAddrs:       c.StringSlice("edge"),
 		Region:          c.String("region"),
+		EdgeIPVersion:   edgeIPVersion,
 		HAConnections:   c.Int("ha-connections"),
 		IncidentLookup:  supervisor.NewIncidentLookup(),
 		IsAutoupdated:   c.Bool("is-autoupdated"),
@@ -352,7 +358,7 @@ func prepareTunnelConfig(
 	}
 	orchestratorConfig := &orchestration.Config{
 		Ingress:            &ingressRules,
-		WarpRoutingEnabled: warpRoutingEnabled,
+		WarpRouting:        ingress.NewWarpRoutingConfig(&cfg.WarpRouting),
 		ConfigurationFlags: parseConfigFlags(c),
 	}
 	return tunnelConfig, orchestratorConfig, nil
@@ -403,4 +409,19 @@ func dedup(slice []string) []string {
 		i++
 	}
 	return keys
+}
+
+// ParseConfigIPVersion returns the IP version from possible expected values from config
+func parseConfigIPVersion(version string) (v allregions.ConfigIPVersion, err error) {
+	switch version {
+	case "4":
+		v = allregions.IPv4Only
+	case "6":
+		v = allregions.IPv6Only
+	case "auto":
+		v = allregions.Auto
+	default: // unspecified or invalid
+		err = fmt.Errorf("invalid value for edge-ip-version: %s", version)
+	}
+	return
 }

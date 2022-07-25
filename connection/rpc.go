@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -57,6 +58,7 @@ type NamedTunnelRPCClient interface {
 		config *NamedTunnelProperties,
 		options *tunnelpogs.ConnectionOptions,
 		connIndex uint8,
+		edgeAddress net.IP,
 		observer *Observer,
 	) (*tunnelpogs.ConnectionDetails, error)
 	SendLocalConfiguration(
@@ -94,6 +96,7 @@ func (rsc *registrationServerClient) RegisterConnection(
 	properties *NamedTunnelProperties,
 	options *tunnelpogs.ConnectionOptions,
 	connIndex uint8,
+	edgeAddress net.IP,
 	observer *Observer,
 ) (*tunnelpogs.ConnectionDetails, error) {
 	conn, err := rsc.client.RegisterConnection(
@@ -114,7 +117,7 @@ func (rsc *registrationServerClient) RegisterConnection(
 
 	observer.metrics.regSuccess.WithLabelValues("registerConnection").Inc()
 
-	observer.logServerInfo(connIndex, conn.Location, fmt.Sprintf("Connection %s registered", conn.UUID))
+	observer.logServerInfo(connIndex, conn.Location, edgeAddress, fmt.Sprintf("Connection %s registered", conn.UUID))
 	observer.sendConnectedEvent(connIndex, conn.Location)
 
 	return conn, nil
@@ -274,7 +277,7 @@ func (h *h2muxConnection) logServerInfo(ctx context.Context, rpcClient *tunnelSe
 		h.observer.log.Err(err).Msg("Failed to retrieve server information")
 		return err
 	}
-	h.observer.logServerInfo(h.connIndex, serverInfo.LocationName, "Connection established")
+	h.observer.logServerInfo(h.connIndex, serverInfo.LocationName, net.IP{}, "Connection established")
 	return nil
 }
 
@@ -290,7 +293,7 @@ func (h *h2muxConnection) registerNamedTunnel(
 	rpcClient := h.newRPCClientFunc(ctx, stream, h.observer.log)
 	defer rpcClient.Close()
 
-	if _, err = rpcClient.RegisterConnection(ctx, namedTunnel, connOptions, h.connIndex, h.observer); err != nil {
+	if _, err = rpcClient.RegisterConnection(ctx, namedTunnel, connOptions, h.connIndex, nil, h.observer); err != nil {
 		return err
 	}
 	return nil

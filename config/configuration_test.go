@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	yaml "gopkg.in/yaml.v2"
+	yaml "gopkg.in/yaml.v3"
 )
 
 func TestConfigFileSettings(t *testing.T) {
@@ -23,7 +23,9 @@ func TestConfigFileSettings(t *testing.T) {
 			Service:  "https://localhost:8001",
 		}
 		warpRouting = WarpRoutingConfig{
-			Enabled: true,
+			Enabled:        true,
+			ConnectTimeout: &CustomDuration{Duration: 2 * time.Second},
+			TCPKeepAlive:   &CustomDuration{Duration: 10 * time.Second},
 		}
 	)
 	rawYAML := `
@@ -48,6 +50,9 @@ ingress:
    service: https://localhost:8001
 warp-routing: 
   enabled: true
+  connectTimeout: 2s
+  tcpKeepAlive: 10s
+
 retries: 5
 grace-period: 30s
 percentage: 3.14
@@ -111,7 +116,7 @@ counters:
 
 }
 
-var rawConfig = []byte(`
+var rawJsonConfig = []byte(`
 {
 	"connectTimeout": 10,
 	"tlsTimeout": 30,
@@ -139,7 +144,8 @@ var rawConfig = []byte(`
 			"ports": [443, 4443],
 			"allow": true
 		}
-	]
+	],
+	"http2Origin": true
 }
 `)
 
@@ -148,15 +154,14 @@ func TestMarshalUnmarshalOriginRequest(t *testing.T) {
 		name          string
 		marshalFunc   func(in interface{}) (out []byte, err error)
 		unMarshalFunc func(in []byte, out interface{}) (err error)
-		baseUnit      time.Duration
 	}{
-		{"json", json.Marshal, json.Unmarshal, time.Second},
-		{"yaml", yaml.Marshal, yaml.Unmarshal, time.Nanosecond},
+		{"json", json.Marshal, json.Unmarshal},
+		{"yaml", yaml.Marshal, yaml.Unmarshal},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			assertConfig(t, tc.marshalFunc, tc.unMarshalFunc, tc.baseUnit)
+			assertConfig(t, tc.marshalFunc, tc.unMarshalFunc)
 		})
 	}
 }
@@ -165,18 +170,17 @@ func assertConfig(
 	t *testing.T,
 	marshalFunc func(in interface{}) (out []byte, err error),
 	unMarshalFunc func(in []byte, out interface{}) (err error),
-	baseUnit time.Duration,
 ) {
 	var config OriginRequestConfig
 	var config2 OriginRequestConfig
 
-	assert.NoError(t, unMarshalFunc(rawConfig, &config))
+	assert.NoError(t, json.Unmarshal(rawJsonConfig, &config))
 
-	assert.Equal(t, baseUnit*10, config.ConnectTimeout.Duration)
-	assert.Equal(t, baseUnit*30, config.TLSTimeout.Duration)
-	assert.Equal(t, baseUnit*30, config.TCPKeepAlive.Duration)
+	assert.Equal(t, time.Second*10, config.ConnectTimeout.Duration)
+	assert.Equal(t, time.Second*30, config.TLSTimeout.Duration)
+	assert.Equal(t, time.Second*30, config.TCPKeepAlive.Duration)
 	assert.Equal(t, true, *config.NoHappyEyeballs)
-	assert.Equal(t, baseUnit*60, config.KeepAliveTimeout.Duration)
+	assert.Equal(t, time.Second*60, config.KeepAliveTimeout.Duration)
 	assert.Equal(t, 10, *config.KeepAliveConnections)
 	assert.Equal(t, "app.tunnel.com", *config.HTTPHostHeader)
 	assert.Equal(t, "app.tunnel.com", *config.OriginServerName)
@@ -188,6 +192,7 @@ func assertConfig(
 	assert.Equal(t, true, *config.NoTLSVerify)
 	assert.Equal(t, uint(9000), *config.ProxyPort)
 	assert.Equal(t, "socks", *config.ProxyType)
+	assert.Equal(t, true, *config.Http2Origin)
 
 	privateV4 := "10.0.0.0/8"
 	privateV6 := "fc00::/7"
