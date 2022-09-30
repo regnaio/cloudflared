@@ -145,22 +145,6 @@ endif
 test-ssh-server:
 	docker-compose -f ssh_server_tests/docker-compose.yml up
 
-define publish_package
-	chmod 664 $(BINARY_NAME)*.$(1); \
-	for HOST in $(CF_PKG_HOSTS); do \
-		ssh-keyscan -t ecdsa $$HOST >> ~/.ssh/known_hosts; \
-		scp -p -4 $(BINARY_NAME)*.$(1) cfsync@$$HOST:/state/cf-pkg/staging/$(2)/$(TARGET_PUBLIC_REPO)/$(BINARY_NAME)/; \
-	done
-endef
-
-.PHONY: publish-deb
-publish-deb: cloudflared-deb
-	$(call publish_package,deb,apt)
-
-.PHONY: publish-rpm
-publish-rpm: cloudflared-rpm
-	$(call publish_package,rpm,yum)
-
 cloudflared.1: cloudflared_man_template
 	cat cloudflared_man_template | sed -e 's/\$${VERSION}/$(VERSION)/; s/\$${DATE}/$(DATE)/' > cloudflared.1
 
@@ -198,7 +182,7 @@ cloudflared-pkg: cloudflared cloudflared.1
 	$(call build_package,osxpkg)
 
 .PHONY: cloudflared-msi
-cloudflared-msi: cloudflared
+cloudflared-msi:
 	wixl --define Version=$(VERSION) --define Path=$(EXECUTABLE_PATH) --output cloudflared-$(VERSION)-$(TARGET_ARCH).msi cloudflared.wxs
 
 .PHONY: cloudflared-darwin-amd64.tgz
@@ -288,10 +272,17 @@ github-mac-upload:
 	python3 github_release.py --path artifacts/cloudflared-darwin-amd64.tgz --release-version $(VERSION) --name cloudflared-darwin-amd64.tgz
 	python3 github_release.py --path artifacts/cloudflared-amd64.pkg --release-version $(VERSION) --name cloudflared-amd64.pkg
 
+.PHONY: github-windows-upload
+github-windows-upload:
+	python3 github_release.py --path built_artifacts/cloudflared-windows-amd64.exe --release-version $(VERSION) --name cloudflared-windows-amd64.exe
+	python3 github_release.py --path built_artifacts/cloudflared-windows-amd64.msi --release-version $(VERSION) --name cloudflared-windows-amd64.msi
+	python3 github_release.py --path built_artifacts/cloudflared-windows-386.exe --release-version $(VERSION) --name cloudflared-windows-386.exe
+	python3 github_release.py --path built_artifacts/cloudflared-windows-386.msi --release-version $(VERSION) --name cloudflared-windows-386.msi
+
 .PHONY: tunnelrpc-deps
 tunnelrpc-deps:
 	which capnp  # https://capnproto.org/install.html
-	which capnpc-go  # go get zombiezen.com/go/capnproto2/capnpc-go
+	which capnpc-go  # go install zombiezen.com/go/capnproto2/capnpc-go@latest
 	capnp compile -ogo tunnelrpc/tunnelrpc.capnp
 
 .PHONY: quic-deps
@@ -302,7 +293,7 @@ quic-deps:
 
 .PHONY: vet
 vet:
-	go vet -mod=vendor ./...
+	go vet -v -mod=vendor ./...
 
 .PHONY: goimports
 goimports:

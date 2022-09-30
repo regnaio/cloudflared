@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/cloudflare/cloudflared/retry"
 	"github.com/cloudflare/cloudflared/signal"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
+	"github.com/cloudflare/cloudflared/tunnelstate"
 )
 
 const (
@@ -43,7 +45,7 @@ type Supervisor struct {
 	config                  *TunnelConfig
 	orchestrator            *orchestration.Orchestrator
 	edgeIPs                 *edgediscovery.Edge
-	edgeTunnelServer        EdgeTunnelServer
+	edgeTunnelServer        *EdgeTunnelServer
 	tunnelErrors            chan tunnelError
 	tunnelsConnecting       map[int]chan struct{}
 	tunnelsProtocolFallback map[int]*protocolFallback
@@ -88,7 +90,9 @@ func NewSupervisor(config *TunnelConfig, orchestrator *orchestration.Orchestrato
 	}
 
 	reconnectCredentialManager := newReconnectCredentialManager(connection.MetricsNamespace, connection.TunnelSubsystem, config.HAConnections)
-	log := NewConnAwareLogger(config.Log, config.Observer)
+
+	tracker := tunnelstate.NewConnTracker(config.Log)
+	log := NewConnAwareLogger(config.Log, tracker, config.Observer)
 
 	var edgeAddrHandler EdgeAddrHandler
 	if isStaticEdge { // static edge addresses
@@ -106,6 +110,7 @@ func NewSupervisor(config *TunnelConfig, orchestrator *orchestration.Orchestrato
 		credentialManager: reconnectCredentialManager,
 		edgeAddrs:         edgeIPs,
 		edgeAddrHandler:   edgeAddrHandler,
+		tracker:           tracker,
 		reconnectCh:       reconnectCh,
 		gracefulShutdownC: gracefulShutdownC,
 		connAwareLogger:   log,
@@ -121,7 +126,7 @@ func NewSupervisor(config *TunnelConfig, orchestrator *orchestration.Orchestrato
 		config:                     config,
 		orchestrator:               orchestrator,
 		edgeIPs:                    edgeIPs,
-		edgeTunnelServer:           edgeTunnelServer,
+		edgeTunnelServer:           &edgeTunnelServer,
 		tunnelErrors:               make(chan tunnelError),
 		tunnelsConnecting:          map[int]chan struct{}{},
 		tunnelsProtocolFallback:    map[int]*protocolFallback{},
@@ -138,6 +143,18 @@ func (s *Supervisor) Run(
 	ctx context.Context,
 	connectedSignal *signal.Signal,
 ) error {
+	if s.config.PacketConfig != nil {
+		go func() {
+			if err := s.config.PacketConfig.ICMPRouter.Serve(ctx); err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					s.log.Logger().Info().Err(err).Msg("icmp router terminated")
+				} else {
+					s.log.Logger().Err(err).Msg("icmp router terminated")
+				}
+			}
+		}()
+	}
+
 	if err := s.initialize(ctx, connectedSignal); err != nil {
 		if err == errEarlyShutdown {
 			return nil
@@ -245,7 +262,7 @@ func (s *Supervisor) initialize(
 		s.config.HAConnections = availableAddrs
 	}
 	s.tunnelsProtocolFallback[0] = &protocolFallback{
-		retry.BackoffHandler{MaxRetries: s.config.Retries},
+		retry.BackoffHandler{MaxRetries: s.config.Retries, RetryForever: true},
 		s.config.ProtocolSelector.Current(),
 		false,
 	}
@@ -267,12 +284,11 @@ func (s *Supervisor) initialize(
 	// At least one successful connection, so start the rest
 	for i := 1; i < s.config.HAConnections; i++ {
 		s.tunnelsProtocolFallback[i] = &protocolFallback{
-			retry.BackoffHandler{MaxRetries: s.config.Retries},
+			retry.BackoffHandler{MaxRetries: s.config.Retries, RetryForever: true},
 			s.config.ProtocolSelector.Current(),
 			false,
 		}
-		ch := signal.New(make(chan struct{}))
-		go s.startTunnel(ctx, i, ch)
+		go s.startTunnel(ctx, i, s.newConnectedTunnelSignal(i))
 		time.Sleep(registrationInterval)
 	}
 	return nil

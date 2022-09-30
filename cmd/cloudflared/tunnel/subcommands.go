@@ -140,6 +140,13 @@ var (
 		EnvVars: []string{"TUNNEL_TRANSPORT_PROTOCOL"},
 		Hidden:  true,
 	})
+	postQuantumFlag = altsrc.NewBoolFlag(&cli.BoolFlag{
+		Name:    "post-quantum",
+		Usage:   "When given creates an experimental post-quantum secure tunnel",
+		Aliases: []string{"pq"},
+		EnvVars: []string{"TUNNEL_POST_QUANTUM"},
+		Hidden:  FipsEnabled,
+	})
 	sortInfoByFlag = &cli.StringFlag{
 		Name:    "sort-by",
 		Value:   "createdAt",
@@ -168,6 +175,16 @@ var (
 		Aliases: []string{"s"},
 		Usage:   "Base64 encoded secret to set for the tunnel. The decoded secret must be at least 32 bytes long. If not specified, a random 32-byte secret will be generated.",
 		EnvVars: []string{"TUNNEL_CREATE_SECRET"},
+	}
+	icmpv4SrcFlag = &cli.StringFlag{
+		Name:    "icmpv4-src",
+		Usage:   "Source address to send/receive ICMPv4 messages. If not provided cloudflared will dial a local address to determine the source IP or fallback to 0.0.0.0.",
+		EnvVars: []string{"TUNNEL_ICMPV4_SRC"},
+	}
+	icmpv6SrcFlag = &cli.StringFlag{
+		Name:    "icmpv6-src",
+		Usage:   "Source address and the interface name to send/receive ICMPv6 messages. If not provided cloudflared will dial a local address to determine the source IP or fallback to ::.",
+		EnvVars: []string{"TUNNEL_ICMPV6_SRC"},
 	}
 )
 
@@ -602,9 +619,12 @@ func buildRunCommand() *cli.Command {
 		forceFlag,
 		credentialsFileFlag,
 		credentialsContentsFlag,
+		postQuantumFlag,
 		selectProtocolFlag,
 		featuresFlag,
 		tunnelTokenFlag,
+		icmpv4SrcFlag,
+		icmpv6SrcFlag,
 	}
 	flags = append(flags, configureProxyFlags(false)...)
 	return &cli.Command{

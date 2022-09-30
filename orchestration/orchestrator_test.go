@@ -355,7 +355,7 @@ func proxyHTTP(originProxy connection.OriginProxy, hostname string) (*http.Respo
 		return nil, err
 	}
 
-	err = originProxy.ProxyHTTP(respWriter, tracing.NewTracedRequest(req), false)
+	err = originProxy.ProxyHTTP(respWriter, tracing.NewTracedHTTPRequest(req, &log), false)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +500,8 @@ func TestClosePreviousProxies(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusTeapot, resp.StatusCode)
 
-	// The hello-world server in config v1 should have been stopped
+	// The hello-world server in config v1 should have been stopped. We wait a bit since it's closed asynchronously.
+	time.Sleep(time.Millisecond * 10)
 	resp, err = proxyHTTP(originProxyV1, hostname)
 	require.Error(t, err)
 	require.Nil(t, resp)
@@ -604,7 +605,7 @@ func TestPersistentConnection(t *testing.T) {
 		respWriter, err := connection.NewHTTP2RespWriter(req, wsRespReadWriter, connection.TypeWebsocket, &log)
 		require.NoError(t, err)
 
-		err = originProxy.ProxyHTTP(respWriter, tracing.NewTracedRequest(req), true)
+		err = originProxy.ProxyHTTP(respWriter, tracing.NewTracedHTTPRequest(req, &log), true)
 		require.NoError(t, err)
 	}()
 

@@ -69,6 +69,7 @@ func NewH2muxConnection(
 	connIndex uint8,
 	observer *Observer,
 	gracefulShutdownC <-chan struct{},
+	log *zerolog.Logger,
 ) (*h2muxConnection, error, bool) {
 	h := &h2muxConnection{
 		orchestrator:      orchestrator,
@@ -79,6 +80,7 @@ func NewH2muxConnection(
 		observer:          observer,
 		gracefulShutdownC: gracefulShutdownC,
 		newRPCClientFunc:  newRegistrationRPCClient,
+		log:               log,
 	}
 
 	// Establish a muxed connection with the edge
@@ -234,7 +236,7 @@ func (h *h2muxConnection) ServeStream(stream *h2mux.MuxedStream) error {
 		return err
 	}
 
-	err = originProxy.ProxyHTTP(respWriter, tracing.NewTracedRequest(req), sourceConnectionType == TypeWebsocket)
+	err = originProxy.ProxyHTTP(respWriter, tracing.NewTracedHTTPRequest(req, h.log), sourceConnectionType == TypeWebsocket)
 	if err != nil {
 		respWriter.WriteErrorResponse()
 	}
@@ -255,6 +257,10 @@ func (h *h2muxConnection) newRequest(stream *h2mux.MuxedStream) (*http.Request, 
 
 type h2muxRespWriter struct {
 	*h2mux.MuxedStream
+}
+
+func (rp *h2muxRespWriter) AddTrailer(trailerName, trailerValue string) {
+	// do nothing. we don't support trailers over h2mux
 }
 
 func (rp *h2muxRespWriter) WriteRespHeaders(status int, header http.Header) error {

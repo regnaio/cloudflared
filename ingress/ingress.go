@@ -11,8 +11,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/net/idna"
 
 	"github.com/cloudflare/cloudflared/config"
+	"github.com/cloudflare/cloudflared/ingress/middleware"
 	"github.com/cloudflare/cloudflared/ipaccess"
 )
 
@@ -168,6 +170,28 @@ func (ing Ingress) CatchAll() *Rule {
 	return &ing.Rules[len(ing.Rules)-1]
 }
 
+func validateAccessConfiguration(cfg *config.AccessConfig) error {
+	if !cfg.Required {
+		return nil
+	}
+
+	// It is possible to set `required:true` and not have these two configured yet.
+	// But if one of them is configured, we'd validate for correctness.
+	if len(cfg.AudTag) == 0 && cfg.TeamName == "" {
+		return nil
+	}
+
+	if len(cfg.AudTag) == 0 {
+		return errors.New("access audtag cannot be empty")
+	}
+
+	if cfg.TeamName == "" {
+		return errors.New("access.TeamName cannot be blank")
+	}
+
+	return nil
+}
+
 func validateIngress(ingress []config.UnvalidatedIngressRule, defaults OriginRequestConfig) (Ingress, error) {
 	rules := make([]Rule, len(ingress))
 	for i, r := range ingress {
@@ -182,11 +206,14 @@ func validateIngress(ingress []config.UnvalidatedIngressRule, defaults OriginReq
 			path := strings.TrimPrefix(r.Service, prefix)
 			service = &unixSocketPath{path: path, scheme: "https"}
 		} else if prefix := "http_status:"; strings.HasPrefix(r.Service, prefix) {
-			status, err := strconv.Atoi(strings.TrimPrefix(r.Service, prefix))
+			statusCode, err := strconv.Atoi(strings.TrimPrefix(r.Service, prefix))
 			if err != nil {
-				return Ingress{}, errors.Wrap(err, "invalid HTTP status")
+				return Ingress{}, errors.Wrap(err, "invalid HTTP status code")
 			}
-			srv := newStatusCode(status)
+			if statusCode < 100 || statusCode > 999 {
+				return Ingress{}, fmt.Errorf("invalid HTTP status code: %d", statusCode)
+			}
+			srv := newStatusCode(statusCode)
 			service = &srv
 		} else if r.Service == HelloWorldService || r.Service == "hello-world" || r.Service == "helloworld" {
 			service = new(helloWorld)
@@ -234,8 +261,29 @@ func validateIngress(ingress []config.UnvalidatedIngressRule, defaults OriginReq
 			}
 		}
 
+		var handlers []middleware.Handler
+		if access := r.OriginRequest.Access; access != nil {
+			if err := validateAccessConfiguration(access); err != nil {
+				return Ingress{}, err
+			}
+			if access.Required {
+				verifier := middleware.NewJWTValidator(access.TeamName, "", access.AudTag)
+				handlers = append(handlers, verifier)
+			}
+		}
+
 		if err := validateHostname(r, i, len(ingress)); err != nil {
 			return Ingress{}, err
+		}
+
+		isCatchAllRule := (r.Hostname == "" || r.Hostname == "*") && r.Path == ""
+		punycodeHostname := ""
+		if !isCatchAllRule {
+			punycode, err := idna.Lookup.ToASCII(r.Hostname)
+			// Don't provide the punycode hostname if it is the same as the original hostname
+			if err == nil && punycode != r.Hostname {
+				punycodeHostname = punycode
+			}
 		}
 
 		var pathRegexp *Regexp
@@ -249,11 +297,13 @@ func validateIngress(ingress []config.UnvalidatedIngressRule, defaults OriginReq
 		}
 
 		rules[i] = Rule{
-			Hostname: r.Hostname,
-			Service:  service,
-			Path:     pathRegexp,
-			Location: r.Location,
-			Config:   cfg,
+			Hostname:         r.Hostname,
+			punycodeHostname: punycodeHostname,
+			Service:          service,
+			Path:             pathRegexp,
+			Location:         r.Location,
+			Handlers:         handlers,
+			Config:           cfg,
 		}
 	}
 	return Ingress{Rules: rules, Defaults: defaults}, nil

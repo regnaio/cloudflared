@@ -24,9 +24,16 @@ const (
 	LogFieldConnIndex      = "connIndex"
 	MaxGracePeriod         = time.Minute * 3
 	MaxConcurrentStreams   = math.MaxUint32
+
+	contentTypeHeader = "content-type"
+	sseContentType    = "text/event-stream"
+	grpcContentType   = "application/grpc"
 )
 
-var switchingProtocolText = fmt.Sprintf("%d %s", http.StatusSwitchingProtocols, http.StatusText(http.StatusSwitchingProtocols))
+var (
+	switchingProtocolText = fmt.Sprintf("%d %s", http.StatusSwitchingProtocols, http.StatusText(http.StatusSwitchingProtocols))
+	flushableContentTypes = []string{sseContentType, grpcContentType}
+)
 
 type Orchestrator interface {
 	UpdateConfig(version int32, config []byte) *pogs.UpdateConfigurationResponse
@@ -123,23 +130,24 @@ func (t Type) String() string {
 
 // OriginProxy is how data flows from cloudflared to the origin services running behind it.
 type OriginProxy interface {
-	ProxyHTTP(w ResponseWriter, tr *tracing.TracedRequest, isWebsocket bool) error
+	ProxyHTTP(w ResponseWriter, tr *tracing.TracedHTTPRequest, isWebsocket bool) error
 	ProxyTCP(ctx context.Context, rwa ReadWriteAcker, req *TCPRequest) error
 }
 
 // TCPRequest defines the input format needed to perform a TCP proxy.
 type TCPRequest struct {
-	Dest    string
-	CFRay   string
-	LBProbe bool
-	FlowID  string
+	Dest      string
+	CFRay     string
+	LBProbe   bool
+	FlowID    string
+	CfTraceID string
 }
 
 // ReadWriteAcker is a readwriter with the ability to Acknowledge to the downstream (edge) that the origin has
 // accepted the connection.
 type ReadWriteAcker interface {
 	io.ReadWriter
-	AckConnection() error
+	AckConnection(tracePropagation string) error
 }
 
 // HTTPResponseReadWriteAcker is an HTTP implementation of ReadWriteAcker.
@@ -168,15 +176,20 @@ func (h *HTTPResponseReadWriteAcker) Write(p []byte) (int, error) {
 
 // AckConnection acks an HTTP connection by sending a switch protocols status code that enables the caller to
 // upgrade to streams.
-func (h *HTTPResponseReadWriteAcker) AckConnection() error {
+func (h *HTTPResponseReadWriteAcker) AckConnection(tracePropagation string) error {
 	resp := &http.Response{
 		Status:        switchingProtocolText,
 		StatusCode:    http.StatusSwitchingProtocols,
 		ContentLength: -1,
+		Header:        http.Header{},
 	}
 
 	if secWebsocketKey := h.req.Header.Get("Sec-WebSocket-Key"); secWebsocketKey != "" {
 		resp.Header = websocket.NewResponseHeader(h.req)
+	}
+
+	if tracePropagation != "" {
+		resp.Header.Add(tracing.CanonicalCloudflaredTracingHeader, tracePropagation)
 	}
 
 	return h.w.WriteRespHeaders(resp.StatusCode, resp.Header)
@@ -184,6 +197,7 @@ func (h *HTTPResponseReadWriteAcker) AckConnection() error {
 
 type ResponseWriter interface {
 	WriteRespHeaders(status int, header http.Header) error
+	AddTrailer(trailerName, trailerValue string)
 	io.Writer
 }
 
@@ -192,10 +206,18 @@ type ConnectedFuse interface {
 	IsConnected() bool
 }
 
-func IsServerSentEvent(headers http.Header) bool {
-	if contentType := headers.Get("content-type"); contentType != "" {
-		return strings.HasPrefix(strings.ToLower(contentType), "text/event-stream")
+// Helper method to let the caller know what content-types should require a flush on every
+// write to a ResponseWriter.
+func shouldFlush(headers http.Header) bool {
+	if contentType := headers.Get(contentTypeHeader); contentType != "" {
+		contentType = strings.ToLower(contentType)
+		for _, c := range flushableContentTypes {
+			if strings.HasPrefix(contentType, c) {
+				return true
+			}
+		}
 	}
+
 	return false
 }
 

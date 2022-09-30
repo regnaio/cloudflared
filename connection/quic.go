@@ -7,18 +7,23 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/lucas-clemente/quic-go"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/cloudflare/cloudflared/datagramsession"
 	"github.com/cloudflare/cloudflared/ingress"
+	"github.com/cloudflare/cloudflared/packet"
 	quicpogs "github.com/cloudflare/cloudflared/quic"
 	"github.com/cloudflare/cloudflared/tracing"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
@@ -33,14 +38,20 @@ const (
 	HTTPHostKey = "HttpHost"
 
 	QUICMetadataFlowID = "FlowID"
+	// emperically this capacity has been working well
+	demuxChanCapacity = 16
 )
 
 // QUICConnection represents the type that facilitates Proxying via QUIC streams.
 type QUICConnection struct {
-	session              quic.Connection
-	logger               *zerolog.Logger
-	orchestrator         Orchestrator
-	sessionManager       datagramsession.Manager
+	session      quic.Connection
+	logger       *zerolog.Logger
+	orchestrator Orchestrator
+	// sessionManager tracks active sessions. It receives datagrams from quic connection via datagramMuxer
+	sessionManager datagramsession.Manager
+	// datagramMuxer mux/demux datagrams from quic connection
+	datagramMuxer        *quicpogs.DatagramMuxerV2
+	packetRouter         *packet.Router
 	controlStreamHandler ControlStreamHandler
 	connOptions          *tunnelpogs.ConnectionOptions
 }
@@ -54,24 +65,25 @@ func NewQUICConnection(
 	connOptions *tunnelpogs.ConnectionOptions,
 	controlStreamHandler ControlStreamHandler,
 	logger *zerolog.Logger,
+	packetRouterConfig *packet.GlobalRouterConfig,
 ) (*QUICConnection, error) {
 	session, err := quic.DialAddr(edgeAddr.String(), tlsConfig, quicConfig)
 	if err != nil {
 		return nil, &EdgeQuicDialError{Cause: err}
 	}
 
-	datagramMuxer, err := quicpogs.NewDatagramMuxer(session, logger)
-	if err != nil {
-		return nil, err
-	}
-
-	sessionManager := datagramsession.NewManager(datagramMuxer, logger)
+	sessionDemuxChan := make(chan *packet.Session, demuxChanCapacity)
+	datagramMuxer := quicpogs.NewDatagramMuxerV2(session, logger, sessionDemuxChan)
+	sessionManager := datagramsession.NewManager(logger, datagramMuxer.SendToSession, sessionDemuxChan)
+	packetRouter := packet.NewRouter(packetRouterConfig, datagramMuxer, &returnPipe{muxer: datagramMuxer}, logger)
 
 	return &QUICConnection{
 		session:              session,
 		orchestrator:         orchestrator,
 		logger:               logger,
 		sessionManager:       sessionManager,
+		datagramMuxer:        datagramMuxer,
+		packetRouter:         packetRouter,
 		controlStreamHandler: controlStreamHandler,
 		connOptions:          connOptions,
 	}, nil
@@ -106,6 +118,14 @@ func (q *QUICConnection) Serve(ctx context.Context) error {
 	errGroup.Go(func() error {
 		defer cancel()
 		return q.sessionManager.Serve(ctx)
+	})
+	errGroup.Go(func() error {
+		defer cancel()
+		return q.datagramMuxer.ServeReceive(ctx)
+	})
+	errGroup.Go(func() error {
+		defer cancel()
+		return q.packetRouter.Serve(ctx)
 	})
 
 	return errGroup.Wait()
@@ -147,7 +167,12 @@ func (q *QUICConnection) runStream(quicStream quic.Stream) {
 	stream := quicpogs.NewSafeStreamCloser(quicStream)
 	defer stream.Close()
 
-	if err := q.handleStream(ctx, stream); err != nil {
+	// we are going to fuse readers/writers from stream <- cloudflared -> origin, and we want to guarantee that
+	// code executed in the code path of handleStream don't trigger an earlier close to the downstream write stream.
+	// So, we wrap the stream with a no-op write closer and only this method can actually close write side of the stream.
+	// A call to close will simulate a close to the read-side, which will fail subsequent reads.
+	noCloseStream := &nopCloserReadWriter{ReadWriteCloser: stream}
+	if err := q.handleStream(ctx, noCloseStream); err != nil {
 		q.logger.Err(err).Msg("Failed to handle QUIC stream")
 	}
 }
@@ -197,7 +222,7 @@ func (q *QUICConnection) dispatchRequest(ctx context.Context, stream *quicpogs.R
 
 	switch request.Type {
 	case quicpogs.ConnectionTypeHTTP, quicpogs.ConnectionTypeWebsocket:
-		tracedReq, err := buildHTTPRequest(ctx, request, stream)
+		tracedReq, err := buildHTTPRequest(ctx, request, stream, q.logger)
 		if err != nil {
 			return err
 		}
@@ -208,8 +233,9 @@ func (q *QUICConnection) dispatchRequest(ctx context.Context, stream *quicpogs.R
 		rwa := &streamReadWriteAcker{stream}
 		metadata := request.MetadataMap()
 		return originProxy.ProxyTCP(ctx, rwa, &TCPRequest{
-			Dest:   request.Dest,
-			FlowID: metadata[QUICMetadataFlowID],
+			Dest:      request.Dest,
+			FlowID:    metadata[QUICMetadataFlowID],
+			CfTraceID: metadata[tracing.TracerContextName],
 		})
 	}
 	return nil
@@ -220,24 +246,42 @@ func (q *QUICConnection) handleRPCStream(rpcStream *quicpogs.RPCServerStream) er
 }
 
 // RegisterUdpSession is the RPC method invoked by edge to register and run a session
-func (q *QUICConnection) RegisterUdpSession(ctx context.Context, sessionID uuid.UUID, dstIP net.IP, dstPort uint16, closeAfterIdleHint time.Duration) error {
+func (q *QUICConnection) RegisterUdpSession(ctx context.Context, sessionID uuid.UUID, dstIP net.IP, dstPort uint16, closeAfterIdleHint time.Duration, traceContext string) (*tunnelpogs.RegisterUdpSessionResponse, error) {
+	traceCtx := tracing.NewTracedContext(ctx, traceContext, q.logger)
+	ctx, registerSpan := traceCtx.Tracer().Start(traceCtx, "register-session", trace.WithAttributes(
+		attribute.String("session-id", sessionID.String()),
+		attribute.String("dst", fmt.Sprintf("%s:%d", dstIP, dstPort)),
+	))
 	// Each session is a series of datagram from an eyeball to a dstIP:dstPort.
 	// (src port, dst IP, dst port) uniquely identifies a session, so it needs a dedicated connected socket.
 	originProxy, err := ingress.DialUDP(dstIP, dstPort)
 	if err != nil {
 		q.logger.Err(err).Msgf("Failed to create udp proxy to %s:%d", dstIP, dstPort)
-		return err
+		tracing.EndWithErrorStatus(registerSpan, err)
+		return nil, err
 	}
+	registerSpan.SetAttributes(
+		attribute.Bool("socket-bind-success", true),
+		attribute.String("src", originProxy.LocalAddr().String()),
+	)
+
 	session, err := q.sessionManager.RegisterSession(ctx, sessionID, originProxy)
 	if err != nil {
 		q.logger.Err(err).Str("sessionID", sessionID.String()).Msgf("Failed to register udp session")
-		return err
+		tracing.EndWithErrorStatus(registerSpan, err)
+		return nil, err
 	}
 
 	go q.serveUDPSession(session, closeAfterIdleHint)
 
 	q.logger.Debug().Str("sessionID", sessionID.String()).Str("src", originProxy.LocalAddr().String()).Str("dst", fmt.Sprintf("%s:%d", dstIP, dstPort)).Msgf("Registered session")
-	return nil
+	tracing.End(registerSpan)
+
+	resp := tunnelpogs.RegisterUdpSessionResponse{
+		Spans: traceCtx.GetProtoSpans(),
+	}
+
+	return &resp, nil
 }
 
 func (q *QUICConnection) serveUDPSession(session *datagramsession.Session, closeAfterIdleHint time.Duration) {
@@ -296,8 +340,12 @@ type streamReadWriteAcker struct {
 }
 
 // AckConnection acks response back to the proxy.
-func (s *streamReadWriteAcker) AckConnection() error {
-	return s.WriteConnectResponseData(nil)
+func (s *streamReadWriteAcker) AckConnection(tracePropagation string) error {
+	metadata := quicpogs.Metadata{
+		Key: tracing.CanonicalCloudflaredTracingHeader,
+		Val: tracePropagation,
+	}
+	return s.WriteConnectResponseData(nil, metadata)
 }
 
 // httpResponseAdapter translates responses written by the HTTP Proxy into ones that can be used in QUIC.
@@ -307,6 +355,10 @@ type httpResponseAdapter struct {
 
 func newHTTPResponseAdapter(s *quicpogs.RequestServerStream) httpResponseAdapter {
 	return httpResponseAdapter{s}
+}
+
+func (hrw httpResponseAdapter) AddTrailer(trailerName, trailerValue string) {
+	// we do not support trailers over QUIC
 }
 
 func (hrw httpResponseAdapter) WriteRespHeaders(status int, header http.Header) error {
@@ -325,7 +377,12 @@ func (hrw httpResponseAdapter) WriteErrorResponse(err error) {
 	hrw.WriteConnectResponseData(err, quicpogs.Metadata{Key: "HttpStatus", Val: strconv.Itoa(http.StatusBadGateway)})
 }
 
-func buildHTTPRequest(ctx context.Context, connectRequest *quicpogs.ConnectRequest, body io.ReadCloser) (*tracing.TracedRequest, error) {
+func buildHTTPRequest(
+	ctx context.Context,
+	connectRequest *quicpogs.ConnectRequest,
+	body io.ReadCloser,
+	log *zerolog.Logger,
+) (*tracing.TracedHTTPRequest, error) {
 	metadata := connectRequest.MetadataMap()
 	dest := connectRequest.Dest
 	method := metadata[HTTPMethodKey]
@@ -367,7 +424,7 @@ func buildHTTPRequest(ctx context.Context, connectRequest *quicpogs.ConnectReque
 	stripWebsocketUpgradeHeader(req)
 
 	// Check for tracing on request
-	tracedReq := tracing.NewTracedRequest(req)
+	tracedReq := tracing.NewTracedHTTPRequest(req, log)
 	return tracedReq, err
 }
 
@@ -384,4 +441,54 @@ func isTransferEncodingChunked(req *http.Request) bool {
 	// https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Transfer-Encoding suggests that this can be a comma
 	// separated value as well.
 	return strings.Contains(strings.ToLower(transferEncodingVal), "chunked")
+}
+
+// A helper struct that guarantees a call to close only affects read side, but not write side.
+type nopCloserReadWriter struct {
+	io.ReadWriteCloser
+
+	// for use by Read only
+	// we don't need a memory barrier here because there is an implicit assumption that
+	// Read calls can't happen concurrently by different go-routines.
+	sawEOF bool
+	// should be updated and read using atomic primitives.
+	// value is read in Read method and written in Close method, which could be done by different
+	// go-routines.
+	closed uint32
+}
+
+func (np *nopCloserReadWriter) Read(p []byte) (n int, err error) {
+	if np.sawEOF {
+		return 0, io.EOF
+	}
+
+	if atomic.LoadUint32(&np.closed) > 0 {
+		return 0, fmt.Errorf("closed by handler")
+	}
+
+	n, err = np.ReadWriteCloser.Read(p)
+	if err == io.EOF {
+		np.sawEOF = true
+	}
+
+	return
+}
+
+func (np *nopCloserReadWriter) Close() error {
+	atomic.StoreUint32(&np.closed, 1)
+
+	return nil
+}
+
+// returnPipe wraps DatagramMuxerV2 to satisfy the packet.FunnelUniPipe interface
+type returnPipe struct {
+	muxer *quicpogs.DatagramMuxerV2
+}
+
+func (rp *returnPipe) SendPacket(dst netip.Addr, pk packet.RawPacket) error {
+	return rp.muxer.SendPacket(pk)
+}
+
+func (rp *returnPipe) Close() error {
+	return nil
 }

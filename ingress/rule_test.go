@@ -14,23 +14,18 @@ import (
 )
 
 func Test_rule_matches(t *testing.T) {
-	type fields struct {
-		Hostname string
-		Path     *Regexp
-		Service  OriginService
-	}
 	type args struct {
 		requestURL *url.URL
 	}
 	tests := []struct {
-		name   string
-		fields fields
-		args   args
-		want   bool
+		name string
+		rule Rule
+		args args
+		want bool
 	}{
 		{
 			name: "Just hostname, pass",
-			fields: fields{
+			rule: Rule{
 				Hostname: "example.com",
 			},
 			args: args{
@@ -39,8 +34,30 @@ func Test_rule_matches(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "Unicode hostname with unicode request, pass",
+			rule: Rule{
+				Hostname:         "môô.cloudflare.com",
+				punycodeHostname: "xn--m-xgaa.cloudflare.com",
+			},
+			args: args{
+				requestURL: MustParseURL(t, "https://môô.cloudflare.com"),
+			},
+			want: true,
+		},
+		{
+			name: "Unicode hostname with punycode request, pass",
+			rule: Rule{
+				Hostname:         "môô.cloudflare.com",
+				punycodeHostname: "xn--m-xgaa.cloudflare.com",
+			},
+			args: args{
+				requestURL: MustParseURL(t, "https://xn--m-xgaa.cloudflare.com"),
+			},
+			want: true,
+		},
+		{
 			name: "Entire hostname is wildcard, should match everything",
-			fields: fields{
+			rule: Rule{
 				Hostname: "*",
 			},
 			args: args{
@@ -50,7 +67,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Just hostname, fail",
-			fields: fields{
+			rule: Rule{
 				Hostname: "example.com",
 			},
 			args: args{
@@ -60,7 +77,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Just wildcard hostname, pass",
-			fields: fields{
+			rule: Rule{
 				Hostname: "*.example.com",
 			},
 			args: args{
@@ -70,7 +87,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Just wildcard hostname, fail",
-			fields: fields{
+			rule: Rule{
 				Hostname: "*.example.com",
 			},
 			args: args{
@@ -80,7 +97,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Just wildcard outside of subdomain in hostname, fail",
-			fields: fields{
+			rule: Rule{
 				Hostname: "*example.com",
 			},
 			args: args{
@@ -90,7 +107,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Wildcard over multiple subdomains",
-			fields: fields{
+			rule: Rule{
 				Hostname: "*.example.com",
 			},
 			args: args{
@@ -100,7 +117,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Hostname and path",
-			fields: fields{
+			rule: Rule{
 				Hostname: "*.example.com",
 				Path:     &Regexp{Regexp: regexp.MustCompile("/static/.*\\.html")},
 			},
@@ -111,7 +128,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Hostname and empty Regex",
-			fields: fields{
+			rule: Rule{
 				Hostname: "example.com",
 				Path:     &Regexp{},
 			},
@@ -122,7 +139,7 @@ func Test_rule_matches(t *testing.T) {
 		},
 		{
 			name: "Hostname and nil path",
-			fields: fields{
+			rule: Rule{
 				Hostname: "example.com",
 				Path:     nil,
 			},
@@ -134,13 +151,8 @@ func Test_rule_matches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := Rule{
-				Hostname: tt.fields.Hostname,
-				Path:     tt.fields.Path,
-				Service:  tt.fields.Service,
-			}
 			u := tt.args.requestURL
-			if got := r.Matches(u.Hostname(), u.Path); got != tt.want {
+			if got := tt.rule.Matches(u.Hostname(), u.Path); got != tt.want {
 				t.Errorf("rule.matches() = %v, want %v", got, tt.want)
 			}
 		})
@@ -182,25 +194,25 @@ func TestMarshalJSON(t *testing.T) {
 		{
 			name:     "Nil",
 			path:     nil,
-			expected: `{"hostname":"example.com","path":null,"service":"https://localhost:8000","originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false}}`,
+			expected: `{"hostname":"example.com","path":null,"service":"https://localhost:8000","Handlers":null,"originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false,"access":{"teamName":"","audTag":null}}}`,
 			want:     true,
 		},
 		{
 			name:     "Nil regex",
 			path:     &Regexp{Regexp: nil},
-			expected: `{"hostname":"example.com","path":null,"service":"https://localhost:8000","originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false}}`,
+			expected: `{"hostname":"example.com","path":null,"service":"https://localhost:8000","Handlers":null,"originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false,"access":{"teamName":"","audTag":null}}}`,
 			want:     true,
 		},
 		{
 			name:     "Empty",
 			path:     &Regexp{Regexp: regexp.MustCompile("")},
-			expected: `{"hostname":"example.com","path":"","service":"https://localhost:8000","originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false}}`,
+			expected: `{"hostname":"example.com","path":"","service":"https://localhost:8000","Handlers":null,"originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false,"access":{"teamName":"","audTag":null}}}`,
 			want:     true,
 		},
 		{
 			name:     "Basic",
 			path:     &Regexp{Regexp: regexp.MustCompile("/echo")},
-			expected: `{"hostname":"example.com","path":"/echo","service":"https://localhost:8000","originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false}}`,
+			expected: `{"hostname":"example.com","path":"/echo","service":"https://localhost:8000","Handlers":null,"originRequest":{"connectTimeout":30,"tlsTimeout":10,"tcpKeepAlive":30,"noHappyEyeballs":false,"keepAliveTimeout":90,"keepAliveConnections":100,"httpHostHeader":"","originServerName":"","caPool":"","noTLSVerify":false,"disableChunkedEncoding":false,"bastionMode":false,"proxyAddress":"127.0.0.1","proxyPort":0,"proxyType":"","ipRules":null,"http2Origin":false,"access":{"teamName":"","audTag":null}}}`,
 			want:     true,
 		},
 	}
