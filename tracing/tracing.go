@@ -157,7 +157,7 @@ func (cft *cfdTracer) GetSpans() (enc string) {
 
 // GetProtoSpans returns the spans as the otlp traces in protobuf byte array.
 func (cft *cfdTracer) GetProtoSpans() (proto []byte) {
-	proto, err := cft.exporter.ProtoSpans()
+	proto, err := cft.exporter.ExportProtoSpans()
 	switch err {
 	case nil:
 		break
@@ -246,7 +246,6 @@ func extractTraceFromString(ctx context.Context, trace string) (context.Context,
 		parts[0] = strings.Repeat("0", left) + parts[0]
 		trace = strings.Join(parts, separator)
 	}
-
 	// Override the 'cf-trace-id' as 'uber-trace-id' so the jaeger propagator can extract it.
 	traceHeader := map[string]string{TracerContextNameOverride: trace}
 	remoteCtx := otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(traceHeader))
@@ -277,6 +276,11 @@ func extractTrace(req *http.Request) (context.Context, bool) {
 	if traceHeader[TracerContextNameOverride] == "" {
 		return nil, false
 	}
+
 	remoteCtx := otel.GetTextMapPropagator().Extract(req.Context(), propagation.MapCarrier(traceHeader))
 	return remoteCtx, true
+}
+
+func NewNoopSpan() trace.Span {
+	return trace.SpanFromContext(nil)
 }

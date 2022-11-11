@@ -59,7 +59,7 @@ func TestParseEchoReply(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		resp, err := newEchoResp(test.replyBuf)
+		resp, err := newEchoV4Resp(test.replyBuf)
 		if test.expectedReply == nil {
 			require.Error(t, err)
 			require.Nil(t, resp)
@@ -125,7 +125,7 @@ func TestParseEchoV6Reply(t *testing.T) {
 	}
 }
 
-//  TestSendEchoErrors makes sure icmpSendEcho handles error cases
+// TestSendEchoErrors makes sure icmpSendEcho handles error cases
 func TestSendEchoErrors(t *testing.T) {
 	testSendEchoErrors(t, netip.IPv4Unspecified())
 	testSendEchoErrors(t, netip.IPv6Unspecified())

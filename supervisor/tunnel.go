@@ -20,8 +20,8 @@ import (
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
 	"github.com/cloudflare/cloudflared/h2mux"
+	"github.com/cloudflare/cloudflared/ingress"
 	"github.com/cloudflare/cloudflared/orchestration"
-	"github.com/cloudflare/cloudflared/packet"
 	quicpogs "github.com/cloudflare/cloudflared/quic"
 	"github.com/cloudflare/cloudflared/retry"
 	"github.com/cloudflare/cloudflared/signal"
@@ -37,6 +37,7 @@ const (
 	FeatureAllowRemoteConfig = "allow_remote_config"
 	FeatureDatagramV2        = "support_datagram_v2"
 	FeaturePostQuantum       = "postquantum"
+	FeatureQUICSupportEOF    = "support_quic_eof"
 )
 
 type TunnelConfig struct {
@@ -70,7 +71,7 @@ type TunnelConfig struct {
 	MuxerConfig      *connection.MuxerConfig
 	ProtocolSelector connection.ProtocolSelector
 	EdgeTLSConfigs   map[connection.Protocol]*tls.Config
-	PacketConfig     *packet.GlobalRouterConfig
+	PacketConfig     *ingress.GlobalRouterConfig
 }
 
 func (c *TunnelConfig) registrationOptions(connectionID uint8, OriginLocalIP string, uuid uuid.UUID) *tunnelpogs.RegistrationOptions {
@@ -254,8 +255,9 @@ func (e *EdgeTunnelServer) Serve(ctx context.Context, connIndex uint8, protocolF
 		if !ok {
 			return err
 		}
+
 		e.config.Observer.SendReconnect(connIndex)
-		connLog.Logger().Info().Msgf("Retrying connection in up to %s seconds", duration)
+		connLog.Logger().Info().Msgf("Retrying connection in up to %s", duration)
 	}
 
 	// Check if the connection error was from an IP issue with the host or
@@ -656,6 +658,7 @@ func (e *EdgeTunnelServer) serveQUIC(
 	quicConn, err := connection.NewQUICConnection(
 		quicConfig,
 		edgeAddr,
+		connIndex,
 		tlsConfig,
 		e.orchestrator,
 		connOptions,

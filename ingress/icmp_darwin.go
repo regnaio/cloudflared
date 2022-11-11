@@ -11,16 +11,17 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net"
 	"net/netip"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/net/icmp"
 
 	"github.com/cloudflare/cloudflared/packet"
+	"github.com/cloudflare/cloudflared/tracing"
 )
 
 type icmpProxy struct {
@@ -129,14 +130,19 @@ func newICMPProxy(listenIP netip.Addr, zone string, logger *zerolog.Logger, idle
 	}, nil
 }
 
-func (ip *icmpProxy) Request(pk *packet.ICMP, responder packet.FunnelUniPipe) error {
-	if pk == nil {
-		return errPacketNil
-	}
+func (ip *icmpProxy) Request(ctx context.Context, pk *packet.ICMP, responder *packetResponder) error {
+	ctx, span := responder.requestSpan(ctx, pk)
+	defer responder.exportSpan()
+
 	originalEcho, err := getICMPEcho(pk.Message)
 	if err != nil {
+		tracing.EndWithErrorStatus(span, err)
 		return err
 	}
+	span.SetAttributes(
+		attribute.Int("originalEchoID", originalEcho.ID),
+		attribute.Int("seq", originalEcho.Seq),
+	)
 	echoIDTrackerKey := flow3Tuple{
 		srcIP:          pk.Src,
 		dstIP:          pk.Dst,
@@ -145,28 +151,32 @@ func (ip *icmpProxy) Request(pk *packet.ICMP, responder packet.FunnelUniPipe) er
 	// TODO: TUN-6744 assign unique flow per (src, echo ID)
 	assignedEchoID, success := ip.echoIDTracker.getOrAssign(echoIDTrackerKey)
 	if !success {
-		return fmt.Errorf("failed to assign unique echo ID")
+		err := fmt.Errorf("failed to assign unique echo ID")
+		tracing.EndWithErrorStatus(span, err)
+		return err
 	}
+	span.SetAttributes(attribute.Int("assignedEchoID", int(assignedEchoID)))
+
 	newFunnelFunc := func() (packet.Funnel, error) {
 		originalEcho, err := getICMPEcho(pk.Message)
 		if err != nil {
 			return nil, err
 		}
-		originSender := originSender{
-			conn:             ip.conn,
-			echoIDTracker:    ip.echoIDTracker,
-			echoIDTrackerKey: echoIDTrackerKey,
-			assignedEchoID:   assignedEchoID,
+		closeCallback := func() error {
+			ip.echoIDTracker.release(echoIDTrackerKey, assignedEchoID)
+			return nil
 		}
-		icmpFlow := newICMPEchoFlow(pk.Src, &originSender, responder, int(assignedEchoID), originalEcho.ID, ip.encoder)
+		icmpFlow := newICMPEchoFlow(pk.Src, closeCallback, ip.conn, responder, int(assignedEchoID), originalEcho.ID, ip.encoder)
 		return icmpFlow, nil
 	}
 	funnelID := echoFunnelID(assignedEchoID)
 	funnel, isNew, err := ip.srcFunnelTracker.GetOrRegister(funnelID, newFunnelFunc)
 	if err != nil {
+		tracing.EndWithErrorStatus(span, err)
 		return err
 	}
 	if isNew {
+		span.SetAttributes(attribute.Bool("newFlow", true))
 		ip.logger.Debug().
 			Str("src", pk.Src.String()).
 			Str("dst", pk.Dst.String()).
@@ -176,9 +186,16 @@ func (ip *icmpProxy) Request(pk *packet.ICMP, responder packet.FunnelUniPipe) er
 	}
 	icmpFlow, err := toICMPEchoFlow(funnel)
 	if err != nil {
+		tracing.EndWithErrorStatus(span, err)
 		return err
 	}
-	return icmpFlow.sendToDst(pk.Dst, pk.Message)
+	err = icmpFlow.sendToDst(pk.Dst, pk.Message)
+	if err != nil {
+		tracing.EndWithErrorStatus(span, err)
+		return err
+	}
+	tracing.End(span)
+	return nil
 }
 
 // Serve listens for responses to the requests until context is done
@@ -202,7 +219,7 @@ func (ip *icmpProxy) Serve(ctx context.Context) error {
 			ip.logger.Debug().Err(err).Str("dst", from.String()).Msg("Failed to parse ICMP reply, continue to parse as full packet")
 			// In unit test, we found out when the listener listens on 0.0.0.0, the socket reads the full packet after
 			// the second reply
-			if err := ip.handleFullPacket(icmpDecoder, buf[:n]); err != nil {
+			if err := ip.handleFullPacket(ctx, icmpDecoder, buf[:n]); err != nil {
 				ip.logger.Debug().Err(err).Str("dst", from.String()).Msg("Failed to parse ICMP reply as full packet")
 			}
 			continue
@@ -211,14 +228,14 @@ func (ip *icmpProxy) Serve(ctx context.Context) error {
 			ip.logger.Debug().Str("dst", from.String()).Msgf("Drop ICMP %s from reply", reply.msg.Type)
 			continue
 		}
-		if err := ip.sendReply(reply); err != nil {
+		if err := ip.sendReply(ctx, reply); err != nil {
 			ip.logger.Error().Err(err).Str("dst", from.String()).Msg("Failed to send ICMP reply")
 			continue
 		}
 	}
 }
 
-func (ip *icmpProxy) handleFullPacket(decoder *packet.ICMPDecoder, rawPacket []byte) error {
+func (ip *icmpProxy) handleFullPacket(ctx context.Context, decoder *packet.ICMPDecoder, rawPacket []byte) error {
 	icmpPacket, err := decoder.Decode(packet.RawPacket{Data: rawPacket})
 	if err != nil {
 		return err
@@ -232,13 +249,13 @@ func (ip *icmpProxy) handleFullPacket(decoder *packet.ICMPDecoder, rawPacket []b
 		msg:  icmpPacket.Message,
 		echo: echo,
 	}
-	if ip.sendReply(&reply); err != nil {
+	if ip.sendReply(ctx, &reply); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (ip *icmpProxy) sendReply(reply *echoReply) error {
+func (ip *icmpProxy) sendReply(ctx context.Context, reply *echoReply) error {
 	funnelID := echoFunnelID(reply.echo.ID)
 	funnel, ok := ip.srcFunnelTracker.Get(funnelID)
 	if !ok {
@@ -248,25 +265,19 @@ func (ip *icmpProxy) sendReply(reply *echoReply) error {
 	if err != nil {
 		return err
 	}
-	return icmpFlow.returnToSrc(reply)
-}
 
-// originSender wraps icmp.PacketConn to implement packet.FunnelUniPipe interface
-type originSender struct {
-	conn             *icmp.PacketConn
-	echoIDTracker    *echoIDTracker
-	echoIDTrackerKey flow3Tuple
-	assignedEchoID   uint16
-}
+	_, span := icmpFlow.responder.replySpan(ctx, ip.logger)
+	defer icmpFlow.responder.exportSpan()
 
-func (os *originSender) SendPacket(dst netip.Addr, pk packet.RawPacket) error {
-	_, err := os.conn.WriteTo(pk.Data, &net.UDPAddr{
-		IP: dst.AsSlice(),
-	})
-	return err
-}
-
-func (os *originSender) Close() error {
-	os.echoIDTracker.release(os.echoIDTrackerKey, os.assignedEchoID)
+	span.SetAttributes(
+		attribute.String("dst", reply.from.String()),
+		attribute.Int("echoID", reply.echo.ID),
+		attribute.Int("seq", reply.echo.Seq),
+		attribute.Int("originalEchoID", icmpFlow.originalEchoID),
+	)
+	if err := icmpFlow.returnToSrc(reply); err != nil {
+		tracing.EndWithErrorStatus(span, err)
+	}
+	tracing.End(span)
 	return nil
 }

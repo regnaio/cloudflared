@@ -131,6 +131,10 @@ endif
 container:
 	docker build --build-arg=TARGET_ARCH=$(TARGET_ARCH) --build-arg=TARGET_OS=$(TARGET_OS) -t cloudflare/cloudflared-$(TARGET_OS)-$(TARGET_ARCH):"$(VERSION)" .
 
+.PHONY: generate-docker-version
+generate-docker-version:
+	echo latest $(VERSION) > versions
+
 .PHONY: test
 test: vet
 ifndef CI
@@ -146,7 +150,7 @@ test-ssh-server:
 	docker-compose -f ssh_server_tests/docker-compose.yml up
 
 cloudflared.1: cloudflared_man_template
-	cat cloudflared_man_template | sed -e 's/\$${VERSION}/$(VERSION)/; s/\$${DATE}/$(DATE)/' > cloudflared.1
+	sed -e 's/\$${VERSION}/$(VERSION)/; s/\$${DATE}/$(DATE)/' cloudflared_man_template > cloudflared.1
 
 install: cloudflared cloudflared.1
 	mkdir -p $(DESTDIR)$(INSTALL_BINDIR) $(DESTDIR)$(INSTALL_MANDIR)
@@ -293,8 +297,8 @@ quic-deps:
 
 .PHONY: vet
 vet:
-	go vet -v -mod=vendor ./...
+	go vet -v -mod=vendor github.com/cloudflare/cloudflared/...
 
-.PHONY: goimports
-goimports:
-	for d in $$(go list -mod=readonly -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc) ; do goimports -format-only -local github.com/cloudflare/cloudflared -w $$d ; done
+.PHONY: fmt
+fmt:
+	goimports -l -w -local github.com/cloudflare/cloudflared $$(go list -mod=vendor -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc)

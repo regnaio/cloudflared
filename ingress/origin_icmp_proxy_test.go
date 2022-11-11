@@ -1,6 +1,7 @@
 package ingress
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -17,6 +18,8 @@ import (
 	"golang.org/x/net/ipv6"
 
 	"github.com/cloudflare/cloudflared/packet"
+	quicpogs "github.com/cloudflare/cloudflared/quic"
+	"github.com/cloudflare/cloudflared/tracing"
 )
 
 var (
@@ -52,9 +55,9 @@ func testICMPRouterEcho(t *testing.T, sendIPv4 bool) {
 		close(proxyDone)
 	}()
 
-	responder := echoFlowResponder{
-		decoder:  packet.NewICMPDecoder(),
-		respChan: make(chan []byte, 1),
+	muxer := newMockMuxer(1)
+	responder := packetResponder{
+		datagramMuxer: muxer,
 	}
 
 	protocol := layers.IPProtocolICMPv6
@@ -90,10 +93,109 @@ func testICMPRouterEcho(t *testing.T, sendIPv4 bool) {
 					},
 				},
 			}
-			require.NoError(t, router.Request(&pk, &responder))
-			responder.validate(t, &pk)
+			require.NoError(t, router.Request(ctx, &pk, &responder))
+			validateEchoFlow(t, <-muxer.cfdToEdge, &pk)
 		}
 	}
+	cancel()
+	<-proxyDone
+}
+
+func TestTraceICMPRouterEcho(t *testing.T) {
+	tracingCtx := "ec31ad8a01fde11fdcabe2efdce36873:52726f6cabc144f5:0:1"
+
+	router, err := NewICMPRouter(localhostIP, localhostIPv6, "", &noopLogger)
+	require.NoError(t, err)
+
+	proxyDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		router.Serve(ctx)
+		close(proxyDone)
+	}()
+
+	// Buffer 3 packets, request span, reply span and reply
+	muxer := newMockMuxer(3)
+	tracingIdentity, err := tracing.NewIdentity(tracingCtx)
+	require.NoError(t, err)
+	serializedIdentity, err := tracingIdentity.MarshalBinary()
+	require.NoError(t, err)
+
+	responder := packetResponder{
+		datagramMuxer:      muxer,
+		tracedCtx:          tracing.NewTracedContext(ctx, tracingIdentity.String(), &noopLogger),
+		serializedIdentity: serializedIdentity,
+	}
+
+	echo := &icmp.Echo{
+		ID:   12910,
+		Seq:  182,
+		Data: []byte(t.Name()),
+	}
+	pk := packet.ICMP{
+		IP: &packet.IP{
+			Src:      localhostIP,
+			Dst:      localhostIP,
+			Protocol: layers.IPProtocolICMPv4,
+			TTL:      packet.DefaultTTL,
+		},
+		Message: &icmp.Message{
+			Type: ipv4.ICMPTypeEcho,
+			Code: 0,
+			Body: echo,
+		},
+	}
+
+	require.NoError(t, router.Request(ctx, &pk, &responder))
+	firstPK := <-muxer.cfdToEdge
+	var requestSpan *quicpogs.TracingSpanPacket
+	// The order of receiving reply or request span is not deterministic
+	switch firstPK.Type() {
+	case quicpogs.DatagramTypeIP:
+		// reply packet
+		validateEchoFlow(t, firstPK, &pk)
+	case quicpogs.DatagramTypeTracingSpan:
+		// Request span
+		requestSpan = firstPK.(*quicpogs.TracingSpanPacket)
+		require.NotEmpty(t, requestSpan.Spans)
+		require.True(t, bytes.Equal(serializedIdentity, requestSpan.TracingIdentity))
+	default:
+		panic(fmt.Sprintf("received unexpected packet type %d", firstPK.Type()))
+	}
+
+	secondPK := <-muxer.cfdToEdge
+	if requestSpan != nil {
+		// If first packet is request span, second packet should be the reply
+		validateEchoFlow(t, secondPK, &pk)
+	} else {
+		requestSpan = secondPK.(*quicpogs.TracingSpanPacket)
+		require.NotEmpty(t, requestSpan.Spans)
+		require.True(t, bytes.Equal(serializedIdentity, requestSpan.TracingIdentity))
+	}
+
+	// Reply span
+	thirdPacket := <-muxer.cfdToEdge
+	replySpan, ok := thirdPacket.(*quicpogs.TracingSpanPacket)
+	require.True(t, ok)
+	require.NotEmpty(t, replySpan.Spans)
+	require.True(t, bytes.Equal(serializedIdentity, replySpan.TracingIdentity))
+	require.False(t, bytes.Equal(requestSpan.Spans, replySpan.Spans))
+
+	echo.Seq++
+	pk.Body = echo
+	// Only first request for a flow is traced. The edge will not send tracing context for the second request
+	newResponder := packetResponder{
+		datagramMuxer: muxer,
+	}
+	require.NoError(t, router.Request(ctx, &pk, &newResponder))
+	validateEchoFlow(t, <-muxer.cfdToEdge, &pk)
+
+	select {
+	case receivedPacket := <-muxer.cfdToEdge:
+		panic(fmt.Sprintf("Receive unexpected packet %+v", receivedPacket))
+	default:
+	}
+
 	cancel()
 	<-proxyDone
 }
@@ -123,9 +225,10 @@ func TestConcurrentRequestsToSameDst(t *testing.T) {
 		echoID := 38451 + i
 		go func() {
 			defer wg.Done()
-			responder := echoFlowResponder{
-				decoder:  packet.NewICMPDecoder(),
-				respChan: make(chan []byte, 1),
+
+			muxer := newMockMuxer(1)
+			responder := packetResponder{
+				datagramMuxer: muxer,
 			}
 			for seq := 0; seq < endSeq; seq++ {
 				pk := &packet.ICMP{
@@ -145,15 +248,15 @@ func TestConcurrentRequestsToSameDst(t *testing.T) {
 						},
 					},
 				}
-				require.NoError(t, router.Request(pk, &responder))
-				responder.validate(t, pk)
+				require.NoError(t, router.Request(ctx, pk, &responder))
+				validateEchoFlow(t, <-muxer.cfdToEdge, pk)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			responder := echoFlowResponder{
-				decoder:  packet.NewICMPDecoder(),
-				respChan: make(chan []byte, 1),
+			muxer := newMockMuxer(1)
+			responder := packetResponder{
+				datagramMuxer: muxer,
 			}
 			for seq := 0; seq < endSeq; seq++ {
 				pk := &packet.ICMP{
@@ -173,8 +276,8 @@ func TestConcurrentRequestsToSameDst(t *testing.T) {
 						},
 					},
 				}
-				require.NoError(t, router.Request(pk, &responder))
-				responder.validate(t, pk)
+				require.NoError(t, router.Request(ctx, pk, &responder))
+				validateEchoFlow(t, <-muxer.cfdToEdge, pk)
 			}
 		}()
 	}
@@ -241,9 +344,9 @@ func testICMPRouterRejectNotEcho(t *testing.T, srcDstIP netip.Addr, msgs []icmp.
 	router, err := NewICMPRouter(localhostIP, localhostIPv6, "", &noopLogger)
 	require.NoError(t, err)
 
-	responder := echoFlowResponder{
-		decoder:  packet.NewICMPDecoder(),
-		respChan: make(chan []byte),
+	muxer := newMockMuxer(1)
+	responder := packetResponder{
+		datagramMuxer: muxer,
 	}
 	protocol := layers.IPProtocolICMPv4
 	if srcDstIP.Is6() {
@@ -259,36 +362,14 @@ func testICMPRouterRejectNotEcho(t *testing.T, srcDstIP netip.Addr, msgs []icmp.
 			},
 			Message: &m,
 		}
-		require.Error(t, router.Request(&pk, &responder))
+		require.Error(t, router.Request(context.Background(), &pk, &responder))
 	}
 }
 
-type echoFlowResponder struct {
-	lock     sync.Mutex
-	decoder  *packet.ICMPDecoder
-	respChan chan []byte
-}
-
-func (efr *echoFlowResponder) SendPacket(dst netip.Addr, pk packet.RawPacket) error {
-	efr.lock.Lock()
-	defer efr.lock.Unlock()
-	copiedPacket := make([]byte, len(pk.Data))
-	copy(copiedPacket, pk.Data)
-	efr.respChan <- copiedPacket
-	return nil
-}
-
-func (efr *echoFlowResponder) Close() error {
-	efr.lock.Lock()
-	defer efr.lock.Unlock()
-	close(efr.respChan)
-	return nil
-}
-
-func (efr *echoFlowResponder) validate(t *testing.T, echoReq *packet.ICMP) {
-	pk := <-efr.respChan
-	decoded, err := efr.decoder.Decode(packet.RawPacket{Data: pk})
-	require.NoError(t, err)
+func validateEchoFlow(t *testing.T, pk quicpogs.Packet, echoReq *packet.ICMP) {
+	decoder := packet.NewICMPDecoder()
+	decoded, err := decoder.Decode(packet.RawPacket{Data: pk.Payload()})
+	require.NoError(t, err, pk)
 	require.Equal(t, decoded.Src, echoReq.Dst)
 	require.Equal(t, decoded.Dst, echoReq.Src)
 	require.Equal(t, echoReq.Protocol, decoded.Protocol)

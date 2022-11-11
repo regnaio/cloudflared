@@ -22,7 +22,6 @@ import (
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
 	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
-	"github.com/cloudflare/cloudflared/packet"
 
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
@@ -47,7 +46,7 @@ var (
 	LogFieldHostname = "hostname"
 
 	secretFlags     = [2]*altsrc.StringFlag{credentialsContentsFlag, tunnelTokenFlag}
-	defaultFeatures = []string{supervisor.FeatureAllowRemoteConfig, supervisor.FeatureSerializedHeaders, supervisor.FeatureDatagramV2}
+	defaultFeatures = []string{supervisor.FeatureAllowRemoteConfig, supervisor.FeatureSerializedHeaders, supervisor.FeatureDatagramV2, supervisor.FeatureQUICSupportEOF}
 
 	configFlags = []string{"autoupdate-freq", "no-autoupdate", "retries", "protocol", "loglevel", "transport-loglevel", "origincert", "metrics", "metrics-update-freq", "edge-ip-version"}
 )
@@ -463,7 +462,7 @@ func parseConfigIPVersion(version string) (v allregions.ConfigIPVersion, err err
 	return
 }
 
-func newPacketConfig(c *cli.Context, logger *zerolog.Logger) (*packet.GlobalRouterConfig, error) {
+func newPacketConfig(c *cli.Context, logger *zerolog.Logger) (*ingress.GlobalRouterConfig, error) {
 	ipv4Src, err := determineICMPv4Src(c.String("icmpv4-src"), logger)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to determine IPv4 source address for ICMP proxy")
@@ -484,7 +483,7 @@ func newPacketConfig(c *cli.Context, logger *zerolog.Logger) (*packet.GlobalRout
 	if err != nil {
 		return nil, err
 	}
-	return &packet.GlobalRouterConfig{
+	return &ingress.GlobalRouterConfig{
 		ICMPRouter: icmpRouter,
 		IPv4Src:    ipv4Src,
 		IPv6Src:    ipv6Src,

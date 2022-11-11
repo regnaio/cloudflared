@@ -1,3 +1,51 @@
+2022.10.3
+- 2022-10-24 TUN-6871: Add default feature to cloudflared to support EOF on QUIC connections
+- 2022-10-19 TUN-6876: Fix flaky TestTraceICMPRouterEcho by taking account request span can return before reply
+- 2022-10-18 TUN-6867: Clear spans right after they are serialized to avoid returning duplicate spans
+2022.10.2
+- 2022-10-18 TUN-6869: Fix Makefile complaining about missing GO packages
+- 2022-10-18 TUN-6864: Don't reuse port in quic unit tests
+- 2022-10-18 TUN-6868: Return left padded tracing ID when tracing identity is converted to string
+
+2022.10.1
+- 2022-10-16 TUN-6861: Trace ICMP on Windows
+- 2022-10-15 TUN-6860: Send access configuration keys to the edge
+- 2022-10-14 TUN-6858: Trace ICMP reply
+- 2022-10-13 TUN-6855: Add DatagramV2Type for IP packet with trace and tracing spans
+- 2022-10-13 TUN-6856: Refactor to lay foundation for tracing ICMP
+- 2022-10-13 TUN-6604: Trace icmp echo request on Linux and Darwin
+- 2022-10-12 Fix log message (#591)
+- 2022-10-12 TUN-6853: Reuse source port when connecting to the edge for quic connections
+- 2022-10-11 TUN-6829: Allow user of datagramsession to control logging level of errors
+- 2022-10-10 RTG-2276 Update qtls and go mod tidy
+- 2022-10-05 Add post-quantum flag to quick tunnel
+- 2022-10-05 TUN-6823: Update github release message to pull from KV
+- 2022-10-04 TUN-6825: Fix cloudflared:version images require arch hyphens
+- 2022-10-03 TUN-6806: Add ingress rule number to log when filtering due to middlware handler
+- 2022-08-17 Label correct container
+- 2022-08-16 Fix typo in help text for `cloudflared tunnel route lb`
+- 2022-07-18 drop usage of cat when sed is invoked to generate the manpage
+- 2021-03-15 update-build-readme
+- 2021-03-15 fix link
+
+2022.10.0
+- 2022-09-30 TUN-6755: Remove unused publish functions
+- 2022-09-30 TUN-6813: Only proxy ICMP packets when warp-routing is enabled
+- 2022-09-29 TUN-6811: Ping group range should be parsed as int32
+- 2022-09-29 TUN-6812: Drop IP packets if ICMP proxy is not initialized
+- 2022-09-28 TUN-6716: Document limitation of Windows ICMP proxy
+- 2022-09-28 TUN-6810: Add component test for post-quantum
+- 2022-09-27 TUN-6715: Provide suggestion to add cloudflared to ping_group_range if it failed to open ICMP socket
+- 2022-09-22 TUN-6792: Fix brew core release by not auditing the formula
+- 2022-09-22 TUN-6774: Validate OriginRequest.Access to add Ingress.Middleware
+- 2022-09-22 TUN-6775: Add middleware.Handler verification to ProxyHTTP
+- 2022-09-22 TUN-6791: Calculate ICMPv6 checksum
+- 2022-09-22 TUN-6801: Add punycode alternatives for ingress rules
+- 2022-09-21 TUN-6772: Add a JWT Validator as an ingress verifier
+- 2022-09-21 TUN-6772: Add a JWT Validator as an ingress verifier
+- 2022-09-21 TUN-6774: Validate OriginRequest.Access to add Ingress.Middleware
+- 2022-09-21 TUN-6772: Add a JWT Validator as an ingress verifier
+- 2022-09-20 TUN-6741: ICMP proxy tries to listen on specific IPv4 & IPv6 when possible
 2022.9.1
 - 2022-09-20 TUN-6777: Fix race condition in TestFunnelIdleTimeout
 - 2022-09-20 TUN-6595: Enable datagramv2 and icmp proxy by default
