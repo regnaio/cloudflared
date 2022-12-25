@@ -82,6 +82,15 @@ const (
 	LogFieldPIDPathname         = "pidPathname"
 	LogFieldTmpTraceFilename    = "tmpTraceFilename"
 	LogFieldTraceOutputFilepath = "traceOutputFilepath"
+
+	tunnelCmdErrorMessage = `You did not specify any valid additional argument to the cloudflared tunnel command. 
+
+If you are trying to run a Quick Tunnel then you need to explicitly pass the --url flag. 
+Eg. cloudflared tunnel --url localhost:8080/. 
+
+Please note that Quick Tunnels are meant to be ephemeral and should only be used for testing purposes. 
+For production usage, we recommend creating Named Tunnels. (https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/tunnel-guide/)
+`
 )
 
 var (
@@ -166,21 +175,34 @@ func TunnelCommand(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
+
 	if name := c.String("name"); name != "" { // Start a named tunnel
 		return runAdhocNamedTunnel(sc, name, c.String(CredFileFlag))
 	}
+
+	// Unauthenticated named tunnel on <random>.<quick-tunnels-service>.com
+	shouldRunQuickTunnel := c.IsSet("url") || c.IsSet("hello-world")
+	if !dnsProxyStandAlone(c, nil) && c.String("hostname") == "" && c.String("quick-service") != "" && shouldRunQuickTunnel {
+		return RunQuickTunnel(sc)
+	}
+
 	if ref := config.GetConfiguration().TunnelID; ref != "" {
 		return fmt.Errorf("Use `cloudflared tunnel run` to start tunnel %s", ref)
 	}
 
-	// Unauthenticated named tunnel on <random>.<quick-tunnels-service>.com
-	// For now, default to legacy setup unless quick-service is specified
-	if !dnsProxyStandAlone(c, nil) && c.String("hostname") == "" && c.String("quick-service") != "" {
-		return RunQuickTunnel(sc)
+	// Start a classic tunnel if hostname is specified.
+	if c.String("hostname") != "" {
+		return runClassicTunnel(sc)
 	}
 
-	// Start a classic tunnel
-	return runClassicTunnel(sc)
+	if c.String("proxy-dns") != "" {
+		// NamedTunnelProperties are nil since proxy dns server does not need it.
+		// This is supported for legacy reasons: dns proxy server is not a tunnel and ideally should
+		// not run as part of cloudflared tunnel.
+		return StartServer(sc.c, buildInfo, nil, sc.log)
+	}
+
+	return errors.New(tunnelCmdErrorMessage)
 }
 
 func Init(info *cliutil.BuildInfo, gracefulShutdown chan struct{}) {
@@ -241,7 +263,8 @@ func StartServer(
 	listeners := gracenet.Net{}
 	errC := make(chan error)
 
-	if config.GetConfiguration().Source() == "" {
+	// Only log for locally configured tunnels (Token is blank).
+	if config.GetConfiguration().Source() == "" && c.String(TunnelTokenFlag) == "" {
 		log.Info().Msg(config.ErrNoConfigFile.Error())
 	}
 
@@ -372,7 +395,12 @@ func StartServer(
 		defer wg.Done()
 		readinessServer := metrics.NewReadyServer(log, clientID)
 		observer.RegisterSink(readinessServer)
-		errC <- metrics.ServeMetrics(metricsListener, ctx.Done(), readinessServer, quickTunnelURL, orchestrator, log)
+		metricsConfig := metrics.Config{
+			ReadyServer:         readinessServer,
+			QuickTunnelHostname: quickTunnelURL,
+			Orchestrator:        orchestrator,
+		}
+		errC <- metrics.ServeMetrics(metricsListener, ctx, metricsConfig, log)
 	}()
 
 	reconnectCh := make(chan supervisor.ReconnectSignal, c.Int("ha-connections"))
@@ -589,6 +617,12 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 			Name:   "heartbeat-count",
 			Usage:  "Minimum number of unacked heartbeats to send before closing the connection.",
 			Value:  5,
+			Hidden: true,
+		}),
+		altsrc.NewIntFlag(&cli.IntFlag{
+			Name:   "max-edge-addr-retries",
+			Usage:  "Maximum number of times to retry on edge addrs before falling back to a lower protocol",
+			Value:  8,
 			Hidden: true,
 		}),
 		// Note TUN-3758 , we use Int because UInt is not supported with altsrc

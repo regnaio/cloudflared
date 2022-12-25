@@ -112,6 +112,7 @@ func (ip *icmpProxy) Request(ctx context.Context, pk *packet.ICMP, responder *pa
 		attribute.Int("seq", originalEcho.Seq),
 	)
 
+	shouldReplaceFunnelFunc := createShouldReplaceFunnelFunc(ip.logger, responder.datagramMuxer, pk, originalEcho.ID)
 	newFunnelFunc := func() (packet.Funnel, error) {
 		conn, err := newICMPConn(ip.listenIP, ip.ipv6Zone)
 		if err != nil {
@@ -137,7 +138,7 @@ func (ip *icmpProxy) Request(ctx context.Context, pk *packet.ICMP, responder *pa
 		dstIP:          pk.Dst,
 		originalEchoID: originalEcho.ID,
 	}
-	funnel, isNew, err := ip.srcFunnelTracker.GetOrRegister(funnelID, newFunnelFunc)
+	funnel, isNew, err := ip.srcFunnelTracker.GetOrRegister(funnelID, shouldReplaceFunnelFunc, newFunnelFunc)
 	if err != nil {
 		tracing.EndWithErrorStatus(span, err)
 		return err
@@ -219,7 +220,7 @@ func (ip *icmpProxy) handleResponse(ctx context.Context, flow *icmpEchoFlow, buf
 		attribute.Int("seq", reply.echo.Seq),
 	)
 	if err := flow.returnToSrc(reply); err != nil {
-		ip.logger.Err(err).Str("dst", from.String()).Msg("Failed to send ICMP reply")
+		ip.logger.Debug().Err(err).Str("dst", from.String()).Msg("Failed to send ICMP reply")
 		tracing.EndWithErrorStatus(span, err)
 		return true, err
 	}

@@ -14,7 +14,6 @@ import (
 
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/edgediscovery"
-	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
 	"github.com/cloudflare/cloudflared/h2mux"
 	"github.com/cloudflare/cloudflared/orchestration"
 	"github.com/cloudflare/cloudflared/retry"
@@ -45,7 +44,7 @@ type Supervisor struct {
 	config                  *TunnelConfig
 	orchestrator            *orchestration.Orchestrator
 	edgeIPs                 *edgediscovery.Edge
-	edgeTunnelServer        *EdgeTunnelServer
+	edgeTunnelServer        TunnelServer
 	tunnelErrors            chan tunnelError
 	tunnelsConnecting       map[int]chan struct{}
 	tunnelsProtocolFallback map[int]*protocolFallback
@@ -94,14 +93,7 @@ func NewSupervisor(config *TunnelConfig, orchestrator *orchestration.Orchestrato
 	tracker := tunnelstate.NewConnTracker(config.Log)
 	log := NewConnAwareLogger(config.Log, tracker, config.Observer)
 
-	var edgeAddrHandler EdgeAddrHandler
-	if isStaticEdge { // static edge addresses
-		edgeAddrHandler = &IPAddrFallback{}
-	} else if config.EdgeIPVersion == allregions.IPv6Only || config.EdgeIPVersion == allregions.Auto {
-		edgeAddrHandler = &IPAddrFallback{}
-	} else { // IPv4Only
-		edgeAddrHandler = &DefaultAddrFallback{}
-	}
+	edgeAddrHandler := NewIPAddrFallback(config.MaxEdgeAddrRetries)
 
 	edgeTunnelServer := EdgeTunnelServer{
 		config:            config,
@@ -285,7 +277,8 @@ func (s *Supervisor) initialize(
 	for i := 1; i < s.config.HAConnections; i++ {
 		s.tunnelsProtocolFallback[i] = &protocolFallback{
 			retry.BackoffHandler{MaxRetries: s.config.Retries, RetryForever: true},
-			s.config.ProtocolSelector.Current(),
+			// Set the protocol we know the first tunnel connected with.
+			s.tunnelsProtocolFallback[0].protocol,
 			false,
 		}
 		go s.startTunnel(ctx, i, s.newConnectedTunnelSignal(i))
