@@ -277,7 +277,9 @@ func (p *Proxy) proxyHTTPRequest(
 		return nil
 	}
 
-	_, _ = cfio.Copy(w, resp.Body)
+	if _, err = cfio.Copy(w, resp.Body); err != nil {
+		return err
+	}
 
 	// copy trailers
 	copyTrailers(w, resp)
@@ -302,21 +304,13 @@ func (p *Proxy) proxyStream(
 		return err
 	}
 	connectSpan.End()
+	defer originConn.Close()
 
 	encodedSpans := tr.GetSpans()
 
 	if err := rwa.AckConnection(encodedSpans); err != nil {
 		return err
 	}
-
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	go func() {
-		// streamCtx is done if req is cancelled or if Stream returns
-		<-streamCtx.Done()
-		originConn.Close()
-	}()
 
 	originConn.Stream(ctx, rwa, p.log)
 	return nil
