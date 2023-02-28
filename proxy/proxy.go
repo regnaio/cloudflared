@@ -30,6 +30,7 @@ const (
 	LogFieldRule          = "ingressRule"
 	LogFieldOriginService = "originService"
 	LogFieldFlowID        = "flowID"
+	LogFieldConnIndex     = "connIndex"
 
 	trailerHeaderName = "Trailer"
 )
@@ -96,9 +97,10 @@ func (p *Proxy) ProxyHTTP(
 		trace.WithAttributes(attribute.String("req-host", req.Host)))
 	rule, ruleNum := p.ingressRules.FindMatchingRule(req.Host, req.URL.Path)
 	logFields := logFields{
-		cfRay:   cfRay,
-		lbProbe: lbProbe,
-		rule:    ruleNum,
+		cfRay:     cfRay,
+		lbProbe:   lbProbe,
+		rule:      ruleNum,
+		connIndex: tr.ConnIndex,
 	}
 	p.logRequest(req, logFields)
 	ruleSpan.SetAttributes(attribute.Int("rule-num", ruleNum))
@@ -179,14 +181,14 @@ func (p *Proxy) ProxyTCP(
 
 	tracedCtx := tracing.NewTracedContext(serveCtx, req.CfTraceID, p.log)
 
-	p.log.Debug().Str(LogFieldFlowID, req.FlowID).Msg("tcp proxy stream started")
+	p.log.Debug().Str(LogFieldFlowID, req.FlowID).Uint8(LogFieldConnIndex, req.ConnIndex).Msg("tcp proxy stream started")
 
 	if err := p.proxyStream(tracedCtx, rwa, req.Dest, p.warpRouting.Proxy); err != nil {
 		p.logRequestError(err, req.CFRay, req.FlowID, "", ingress.ServiceWarpRouting)
 		return err
 	}
 
-	p.log.Debug().Str(LogFieldFlowID, req.FlowID).Msg("tcp proxy stream finished successfully")
+	p.log.Debug().Str(LogFieldFlowID, req.FlowID).Uint8(LogFieldConnIndex, req.ConnIndex).Msg("tcp proxy stream finished successfully")
 
 	return nil
 }
@@ -336,10 +338,11 @@ func (p *Proxy) appendTagHeaders(r *http.Request) {
 }
 
 type logFields struct {
-	cfRay   string
-	lbProbe bool
-	rule    interface{}
-	flowID  string
+	cfRay     string
+	lbProbe   bool
+	rule      interface{}
+	flowID    string
+	connIndex uint8
 }
 
 func copyTrailers(w connection.ResponseWriter, response *http.Response) {
@@ -364,6 +367,7 @@ func (p *Proxy) logRequest(r *http.Request, fields logFields) {
 		Str("host", r.Host).
 		Str("path", r.URL.Path).
 		Interface("rule", fields.rule).
+		Uint8(LogFieldConnIndex, fields.connIndex).
 		Msg("Inbound request")
 
 	if contentLen := r.ContentLength; contentLen == -1 {
@@ -376,18 +380,18 @@ func (p *Proxy) logRequest(r *http.Request, fields logFields) {
 func (p *Proxy) logOriginResponse(resp *http.Response, fields logFields) {
 	responseByCode.WithLabelValues(strconv.Itoa(resp.StatusCode)).Inc()
 	if fields.cfRay != "" {
-		p.log.Debug().Msgf("CF-RAY: %s Status: %s served by ingress %d", fields.cfRay, resp.Status, fields.rule)
+		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Status: %s served by ingress %d", fields.cfRay, resp.Status, fields.rule)
 	} else if fields.lbProbe {
-		p.log.Debug().Msgf("Response to Load Balancer health check %s", resp.Status)
+		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("Response to Load Balancer health check %s", resp.Status)
 	} else {
-		p.log.Debug().Msgf("Status: %s served by ingress %v", resp.Status, fields.rule)
+		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("Status: %s served by ingress %v", resp.Status, fields.rule)
 	}
-	p.log.Debug().Msgf("CF-RAY: %s Response Headers %+v", fields.cfRay, resp.Header)
+	p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Response Headers %+v", fields.cfRay, resp.Header)
 
 	if contentLen := resp.ContentLength; contentLen == -1 {
-		p.log.Debug().Msgf("CF-RAY: %s Response content length unknown", fields.cfRay)
+		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Response content length unknown", fields.cfRay)
 	} else {
-		p.log.Debug().Msgf("CF-RAY: %s Response content length %d", fields.cfRay, contentLen)
+		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Response content length %d", fields.cfRay, contentLen)
 	}
 }
 
