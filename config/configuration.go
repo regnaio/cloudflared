@@ -181,7 +181,7 @@ type UnvalidatedIngressRule struct {
 	Path          string              `yaml:"path,omitempty" json:"path,omitempty"`
 	Service       string              `yaml:"service,omitempty" json:"service,omitempty"`
 	Location      string              `yaml:"location,omitempty" json:"location,omitempty"`
-	OriginRequest OriginRequestConfig `yaml:"originRequest,omitempty" yaml:"originRequest" json:"originRequest"`
+	OriginRequest OriginRequestConfig `yaml:"originRequest,omitempty" json:"originRequest"`
 }
 
 // OriginRequestConfig is a set of optional fields that users may set to
@@ -229,9 +229,9 @@ type OriginRequestConfig struct {
 	// IP rules for the proxy service
 	IPRules []IngressIPRule `yaml:"ipRules,omitempty" json:"ipRules,omitempty"`
 	// Attempt to connect to origin with HTTP/2
-	Http2Origin *bool `yaml:"http2Origin" json:"http2Origin,omitempty"`
+	Http2Origin *bool `yaml:"http2Origin,omitempty" json:"http2Origin,omitempty"`
 	// Access holds all access related configs
-	Access *AccessConfig `yaml:"access" json:"access,omitempty"`
+	Access *AccessConfig `yaml:"access,omitempty" json:"access,omitempty"`
 }
 
 type AccessConfig struct {
