@@ -49,6 +49,7 @@ type TunnelConfig struct {
 	EdgeAddrs          []string
 	Region             string
 	EdgeIPVersion      allregions.ConfigIPVersion
+	EdgeBindAddr       net.IP
 	HAConnections      int
 	IncidentLookup     IncidentLookup
 	IsAutoupdated      bool
@@ -68,7 +69,6 @@ type TunnelConfig struct {
 	PQKexIdx int
 
 	NamedTunnel      *connection.NamedTunnelProperties
-	MuxerConfig      *connection.MuxerConfig
 	ProtocolSelector connection.ProtocolSelector
 	EdgeTLSConfigs   map[connection.Protocol]*tls.Config
 	PacketConfig     *ingress.GlobalRouterConfig
@@ -90,7 +90,7 @@ func (c *TunnelConfig) registrationOptions(connectionID uint8, OriginLocalIP str
 		OriginLocalIP:        OriginLocalIP,
 		IsAutoupdated:        c.IsAutoupdated,
 		RunFromTerminal:      c.RunFromTerminal,
-		CompressionQuality:   uint64(c.MuxerConfig.CompressionSetting),
+		CompressionQuality:   0,
 		UUID:                 uuid.String(),
 		Features:             c.SupportedFeatures(),
 	}
@@ -105,7 +105,7 @@ func (c *TunnelConfig) connectionOptions(originLocalAddr string, numPreviousAtte
 		Client:              c.NamedTunnel.Client,
 		OriginLocalIP:       originIP,
 		ReplaceExisting:     c.ReplaceExisting,
-		CompressionQuality:  uint8(c.MuxerConfig.CompressionSetting),
+		CompressionQuality:  0,
 		NumPreviousAttempts: numPreviousAttempts,
 	}
 }
@@ -207,6 +207,7 @@ type EdgeTunnelServer struct {
 	credentialManager *reconnectCredentialManager
 	edgeAddrHandler   EdgeAddrHandler
 	edgeAddrs         *edgediscovery.Edge
+	edgeBindAddr      net.IP
 	reconnectCh       chan ReconnectSignal
 	gracefulShutdownC <-chan struct{}
 	tracker           *tunnelstate.ConnTracker
@@ -497,7 +498,7 @@ func (e *EdgeTunnelServer) serveConnection(
 			connIndex)
 
 	case connection.HTTP2:
-		edgeConn, err := edgediscovery.DialEdge(ctx, dialTimeout, e.config.EdgeTLSConfigs[protocol], addr.TCP)
+		edgeConn, err := edgediscovery.DialEdge(ctx, dialTimeout, e.config.EdgeTLSConfigs[protocol], addr.TCP, e.edgeBindAddr)
 		if err != nil {
 			connLog.ConnAwareLogger().Err(err).Msg("Unable to establish connection with Cloudflare edge")
 			return err, true
@@ -516,21 +517,7 @@ func (e *EdgeTunnelServer) serveConnection(
 		}
 
 	default:
-		edgeConn, err := edgediscovery.DialEdge(ctx, dialTimeout, e.config.EdgeTLSConfigs[protocol], addr.TCP)
-		if err != nil {
-			connLog.ConnAwareLogger().Err(err).Msg("Unable to establish connection with Cloudflare edge")
-			return err, true
-		}
-
-		if err := e.serveH2mux(
-			ctx,
-			connLog,
-			edgeConn,
-			connIndex,
-			connectedFuse,
-		); err != nil {
-			return err, false
-		}
+		return fmt.Errorf("invalid protocol selected: %s", protocol), false
 	}
 	return
 }
@@ -541,55 +528,6 @@ type unrecoverableError struct {
 
 func (r unrecoverableError) Error() string {
 	return r.err.Error()
-}
-
-func (e *EdgeTunnelServer) serveH2mux(
-	ctx context.Context,
-	connLog *ConnAwareLogger,
-	edgeConn net.Conn,
-	connIndex uint8,
-	connectedFuse *connectedFuse,
-) error {
-	if e.config.NeedPQ {
-		return unrecoverableError{errors.New("H2Mux transport does not support post-quantum")}
-	}
-	connLog.Logger().Debug().Msgf("Connecting via h2mux")
-	// Returns error from parsing the origin URL or handshake errors
-	handler, err, recoverable := connection.NewH2muxConnection(
-		e.orchestrator,
-		e.config.GracePeriod,
-		e.config.MuxerConfig,
-		edgeConn,
-		connIndex,
-		e.config.Observer,
-		e.gracefulShutdownC,
-		e.config.Log,
-	)
-	if err != nil {
-		if !recoverable {
-			return unrecoverableError{err}
-		}
-		return err
-	}
-
-	errGroup, serveCtx := errgroup.WithContext(ctx)
-
-	errGroup.Go(func() error {
-		connOptions := e.config.connectionOptions(edgeConn.LocalAddr().String(), uint8(connectedFuse.backoff.Retries()))
-		return handler.ServeNamedTunnel(serveCtx, e.config.NamedTunnel, connOptions, connectedFuse)
-	})
-
-	errGroup.Go(func() error {
-		err := listenReconnect(serveCtx, e.reconnectCh, e.gracefulShutdownC)
-		if err != nil {
-			// forcefully break the connection (this is only used for testing)
-			// errgroup will return context canceled for the handler.ServeClassicTunnel
-			connLog.Logger().Debug().Msg("Forcefully breaking h2mux connection")
-		}
-		return err
-	})
-
-	return errGroup.Wait()
 }
 
 func (e *EdgeTunnelServer) serveHTTP2(
@@ -672,6 +610,7 @@ func (e *EdgeTunnelServer) serveQUIC(
 	quicConn, err := connection.NewQUICConnection(
 		quicConfig,
 		edgeAddr,
+		e.edgeBindAddr,
 		connIndex,
 		tlsConfig,
 		e.orchestrator,

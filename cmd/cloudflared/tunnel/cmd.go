@@ -42,6 +42,9 @@ import (
 const (
 	sentryDSN = "https://56a9c9fa5c364ab28f34b14f35ea0f1b:3e8827f6f9f740738eb11138f7bebb68@sentry.io/189878"
 
+	// ha-Connections specifies how many connections to make to the edge
+	haConnectionsFlag = "ha-connections"
+
 	// sshPortFlag is the port on localhost the cloudflared ssh server will run on
 	sshPortFlag = "local-ssh-port"
 
@@ -84,12 +87,12 @@ const (
 	LogFieldTmpTraceFilename    = "tmpTraceFilename"
 	LogFieldTraceOutputFilepath = "traceOutputFilepath"
 
-	tunnelCmdErrorMessage = `You did not specify any valid additional argument to the cloudflared tunnel command. 
+	tunnelCmdErrorMessage = `You did not specify any valid additional argument to the cloudflared tunnel command.
 
-If you are trying to run a Quick Tunnel then you need to explicitly pass the --url flag. 
-Eg. cloudflared tunnel --url localhost:8080/. 
+If you are trying to run a Quick Tunnel then you need to explicitly pass the --url flag.
+Eg. cloudflared tunnel --url localhost:8080/.
 
-Please note that Quick Tunnels are meant to be ephemeral and should only be used for testing purposes. 
+Please note that Quick Tunnels are meant to be ephemeral and should only be used for testing purposes.
 For production usage, we recommend creating Named Tunnels. (https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/tunnel-guide/)
 `
 )
@@ -199,7 +202,7 @@ func TunnelCommand(c *cli.Context) error {
 	// Run a quick tunnel
 	// A unauthenticated named tunnel hosted on <random>.<quick-tunnels-service>.com
 	// We don't support running proxy-dns and a quick tunnel at the same time as the same process
-	shouldRunQuickTunnel := c.IsSet("url") || c.IsSet("hello-world")
+	shouldRunQuickTunnel := c.IsSet("url") || c.IsSet(ingress.HelloWorldFlag)
 	if !c.IsSet("proxy-dns") && c.String("quick-service") != "" && shouldRunQuickTunnel {
 		return RunQuickTunnel(sc)
 	}
@@ -215,6 +218,9 @@ func TunnelCommand(c *cli.Context) error {
 	}
 
 	if c.IsSet("proxy-dns") {
+		if shouldRunQuickTunnel {
+			return fmt.Errorf("running a quick tunnel with `proxy-dns` is not supported")
+		}
 		// NamedTunnelProperties are nil since proxy dns server does not need it.
 		// This is supported for legacy reasons: dns proxy server is not a tunnel and ideally should
 		// not run as part of cloudflared tunnel.
@@ -415,7 +421,7 @@ func StartServer(
 		errC <- metrics.ServeMetrics(metricsListener, ctx, metricsConfig, log)
 	}()
 
-	reconnectCh := make(chan supervisor.ReconnectSignal, c.Int("ha-connections"))
+	reconnectCh := make(chan supervisor.ReconnectSignal, c.Int(haConnectionsFlag))
 	if c.IsSet("stdin-control") {
 		log.Info().Msg("Enabling control through stdin")
 		go stdinControl(reconnectCh, log)
@@ -551,9 +557,15 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 		}),
 		altsrc.NewStringFlag(&cli.StringFlag{
 			Name:    "edge-ip-version",
-			Usage:   "Cloudflare Edge ip address version to connect with. {4, 6, auto}",
+			Usage:   "Cloudflare Edge IP address version to connect with. {4, 6, auto}",
 			EnvVars: []string{"TUNNEL_EDGE_IP_VERSION"},
 			Value:   "4",
+			Hidden:  false,
+		}),
+		altsrc.NewStringFlag(&cli.StringFlag{
+			Name:    "edge-bind-address",
+			Usage:   "Bind to IP address for outgoing connections to Cloudflare Edge.",
+			EnvVars: []string{"TUNNEL_EDGE_BIND_ADDRESS"},
 			Hidden:  false,
 		}),
 		altsrc.NewStringFlag(&cli.StringFlag{
@@ -646,7 +658,7 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 			Hidden:  shouldHide,
 		}),
 		altsrc.NewIntFlag(&cli.IntFlag{
-			Name:   "ha-connections",
+			Name:   haConnectionsFlag,
 			Value:  4,
 			Hidden: true,
 		}),
@@ -780,7 +792,7 @@ func configureProxyFlags(shouldHide bool) []cli.Flag {
 			Hidden:  shouldHide,
 		}),
 		altsrc.NewBoolFlag(&cli.BoolFlag{
-			Name:    "hello-world",
+			Name:    ingress.HelloWorldFlag,
 			Value:   false,
 			Usage:   "Run Hello World Server",
 			EnvVars: []string{"TUNNEL_HELLO_WORLD"},

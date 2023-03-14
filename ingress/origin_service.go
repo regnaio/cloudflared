@@ -23,6 +23,7 @@ import (
 
 const (
 	HelloWorldService = "hello_world"
+	HelloWorldFlag    = "hello-world"
 	HttpStatusService = "http_status"
 )
 
@@ -246,10 +247,19 @@ func (o helloWorld) MarshalJSON() ([]byte, error) {
 // Typical use-case is "user wants the catch-all rule to just respond 404".
 type statusCode struct {
 	code int
+
+	// Set only when the user has not defined any ingress rules
+	defaultResp bool
+	log         *zerolog.Logger
 }
 
 func newStatusCode(status int) statusCode {
 	return statusCode{code: status}
+}
+
+// default status code (503) that is returned for requests to cloudflared that don't have any ingress rules setup
+func newDefaultStatusCode(log *zerolog.Logger) statusCode {
+	return statusCode{code: 503, defaultResp: true, log: log}
 }
 
 func (o *statusCode) String() string {

@@ -23,7 +23,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/cloudflare/cloudflared/cfio"
-
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/hello"
@@ -34,7 +33,7 @@ import (
 )
 
 var (
-	testTags        = []tunnelpogs.Tag{tunnelpogs.Tag{Name: "Name", Value: "value"}}
+	testTags        = []tunnelpogs.Tag{{Name: "Name", Value: "value"}}
 	noWarpRouting   = ingress.WarpRoutingConfig{}
 	testWarpRouting = ingress.WarpRoutingConfig{
 		Enabled:        true,
@@ -150,8 +149,7 @@ func TestProxySingleOrigin(t *testing.T) {
 	err := cliCtx.Set("hello-world", "true")
 	require.NoError(t, err)
 
-	allowURLFromArgs := false
-	ingressRule, err := ingress.NewSingleOrigin(cliCtx, allowURLFromArgs)
+	ingressRule, err := ingress.ParseIngressFromConfigAndCLI(&config.Configuration{}, cliCtx, &log)
 	require.NoError(t, err)
 
 	require.NoError(t, ingressRule.StartOrigins(&log, ctx.Done()))
@@ -701,8 +699,7 @@ func TestConnections(t *testing.T) {
 			cancel()
 			assert.Equal(t, test.want.err, err != nil)
 			assert.Equal(t, test.want.message, replayer.Bytes())
-			respPrinter := respWriter.(responsePrinter)
-			assert.Equal(t, test.want.headers, respPrinter.headers())
+			assert.Equal(t, test.want.headers, respWriter.Header())
 			replayer.rw.Reset()
 		})
 	}
@@ -795,10 +792,6 @@ func (p *pipedRequestBody) Close() error {
 	return nil
 }
 
-type responsePrinter interface {
-	headers() http.Header
-}
-
 type wsRespWriter struct {
 	w               io.Writer
 	responseHeaders http.Header
@@ -837,10 +830,14 @@ func (w *wsRespWriter) AddTrailer(trailerName, trailerValue string) {
 }
 
 // respHeaders is a test function to read respHeaders
-func (w *wsRespWriter) headers() http.Header {
+func (w *wsRespWriter) Header() http.Header {
 	// Removing indeterminstic header because it cannot be asserted.
 	w.responseHeaders.Del("Date")
 	return w.responseHeaders
+}
+
+func (w *wsRespWriter) WriteHeader(status int) {
+	// unused
 }
 
 type mockTCPRespWriter struct {
@@ -863,7 +860,7 @@ func (m *mockTCPRespWriter) Write(p []byte) (n int, err error) {
 	return m.w.Write(p)
 }
 
-func (w *mockTCPRespWriter) AddTrailer(trailerName, trailerValue string) {
+func (m *mockTCPRespWriter) AddTrailer(trailerName, trailerValue string) {
 	// do nothing
 }
 
@@ -874,8 +871,12 @@ func (m *mockTCPRespWriter) WriteRespHeaders(status int, header http.Header) err
 }
 
 // respHeaders is a test function to read respHeaders
-func (m *mockTCPRespWriter) headers() http.Header {
+func (m *mockTCPRespWriter) Header() http.Header {
 	return m.responseHeaders
+}
+
+func (m *mockTCPRespWriter) WriteHeader(status int) {
+	// do nothing
 }
 
 func createSingleIngressConfig(t *testing.T, service string) ingress.Ingress {

@@ -25,7 +25,6 @@ import (
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
-	"github.com/cloudflare/cloudflared/h2mux"
 	"github.com/cloudflare/cloudflared/ingress"
 	"github.com/cloudflare/cloudflared/orchestration"
 	"github.com/cloudflare/cloudflared/supervisor"
@@ -44,7 +43,7 @@ var (
 	secretFlags     = [2]*altsrc.StringFlag{credentialsContentsFlag, tunnelTokenFlag}
 	defaultFeatures = []string{supervisor.FeatureAllowRemoteConfig, supervisor.FeatureSerializedHeaders, supervisor.FeatureDatagramV2, supervisor.FeatureQUICSupportEOF}
 
-	configFlags = []string{"autoupdate-freq", "no-autoupdate", "retries", "protocol", "loglevel", "transport-loglevel", "origincert", "metrics", "metrics-update-freq", "edge-ip-version"}
+	configFlags = []string{"autoupdate-freq", "no-autoupdate", "retries", "protocol", "loglevel", "transport-loglevel", "origincert", "metrics", "metrics-update-freq", "edge-ip-version", "edge-bind-address"}
 )
 
 // returns the first path that contains a cert.pem file. If none of the DefaultConfigSearchDirectories
@@ -125,7 +124,7 @@ func isSecretEnvVar(key string) bool {
 func dnsProxyStandAlone(c *cli.Context, namedTunnel *connection.NamedTunnelProperties) bool {
 	return c.IsSet("proxy-dns") &&
 		!(c.IsSet("name") || // adhoc-named tunnel
-			c.IsSet("hello-world") || // quick or named tunnel
+			c.IsSet(ingress.HelloWorldFlag) || // quick or named tunnel
 			namedTunnel != nil) // named tunnel
 }
 
@@ -228,22 +227,9 @@ func prepareTunnelConfig(
 		Arch:     info.OSArch(),
 	}
 	cfg := config.GetConfiguration()
-	ingressRules, err := ingress.ParseIngress(cfg)
-	if err != nil && err != ingress.ErrNoIngressRules {
+	ingressRules, err := ingress.ParseIngressFromConfigAndCLI(cfg, c, log)
+	if err != nil {
 		return nil, nil, err
-	}
-	if c.IsSet("url") {
-		// Ingress rules cannot be provided with --url flag
-		if !ingressRules.IsEmpty() {
-			return nil, nil, ingress.ErrURLIncompatibleWithIngress
-		} else {
-			// Only for quick or adhoc tunnels will we attempt to parse:
-			// --url, --hello-world, or --unix-socket flag for a tunnel ingress rule
-			ingressRules, err = ingress.NewSingleOrigin(c, false)
-			if err != nil {
-				return nil, nil, err
-			}
-		}
 	}
 
 	protocolSelector, err := connection.NewProtocolSelector(transportProtocol, namedTunnel.Credentials.AccountTag, c.IsSet(TunnelTokenFlag), c.Bool("post-quantum"), edgediscovery.ProtocolPercentage, connection.ResolveTTL, log)
@@ -272,17 +258,21 @@ func prepareTunnelConfig(
 	if err != nil {
 		return nil, nil, err
 	}
-	muxerConfig := &connection.MuxerConfig{
-		HeartbeatInterval: c.Duration("heartbeat-interval"),
-		// Note TUN-3758 , we use Int because UInt is not supported with altsrc
-		MaxHeartbeats: uint64(c.Int("heartbeat-count")),
-		// Note TUN-3758 , we use Int because UInt is not supported with altsrc
-		CompressionSetting: h2mux.CompressionSetting(uint64(c.Int("compression-quality"))),
-		MetricsUpdateFreq:  c.Duration("metrics-update-freq"),
-	}
 	edgeIPVersion, err := parseConfigIPVersion(c.String("edge-ip-version"))
 	if err != nil {
 		return nil, nil, err
+	}
+	edgeBindAddr, err := parseConfigBindAddress(c.String("edge-bind-address"))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := testIPBindable(edgeBindAddr); err != nil {
+		return nil, nil, fmt.Errorf("invalid edge-bind-address %s: %v", edgeBindAddr, err)
+	}
+	edgeIPVersion, err = adjustIPVersionByBindAddress(edgeIPVersion, edgeBindAddr)
+	if err != nil {
+		// This is not a fatal error, we just overrode edgeIPVersion
+		log.Warn().Str("edgeIPVersion", edgeIPVersion.String()).Err(err).Msg("Overriding edge-ip-version")
 	}
 
 	var pqKexIdx int
@@ -302,7 +292,8 @@ func prepareTunnelConfig(
 		EdgeAddrs:       c.StringSlice("edge"),
 		Region:          c.String("region"),
 		EdgeIPVersion:   edgeIPVersion,
-		HAConnections:   c.Int("ha-connections"),
+		EdgeBindAddr:    edgeBindAddr,
+		HAConnections:   c.Int(haConnectionsFlag),
 		IncidentLookup:  supervisor.NewIncidentLookup(),
 		IsAutoupdated:   c.Bool("is-autoupdated"),
 		LBPool:          c.String("lb-pool"),
@@ -315,7 +306,6 @@ func prepareTunnelConfig(
 		Retries:            uint(c.Int("retries")),
 		RunFromTerminal:    isRunningFromTerminal(),
 		NamedTunnel:        namedTunnel,
-		MuxerConfig:        muxerConfig,
 		ProtocolSelector:   protocolSelector,
 		EdgeTLSConfigs:     edgeTLSConfigs,
 		NeedPQ:             needPQ,
@@ -392,6 +382,51 @@ func parseConfigIPVersion(version string) (v allregions.ConfigIPVersion, err err
 		err = fmt.Errorf("invalid value for edge-ip-version: %s", version)
 	}
 	return
+}
+
+func parseConfigBindAddress(ipstr string) (net.IP, error) {
+	// Unspecified - it's fine
+	if ipstr == "" {
+		return nil, nil
+	}
+	ip := net.ParseIP(ipstr)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid value for edge-bind-address: %s", ipstr)
+	}
+	return ip, nil
+}
+
+func testIPBindable(ip net.IP) error {
+	// "Unspecified" = let OS choose, so always bindable
+	if ip == nil {
+		return nil
+	}
+
+	addr := &net.UDPAddr{IP: ip, Port: 0}
+	listener, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return err
+	}
+	listener.Close()
+	return nil
+}
+
+func adjustIPVersionByBindAddress(ipVersion allregions.ConfigIPVersion, ip net.IP) (allregions.ConfigIPVersion, error) {
+	if ip == nil {
+		return ipVersion, nil
+	}
+	// https://pkg.go.dev/net#IP.To4: "If ip is not an IPv4 address, To4 returns nil."
+	if ip.To4() != nil {
+		if ipVersion == allregions.IPv6Only {
+			return allregions.IPv4Only, fmt.Errorf("IPv4 bind address is specified, but edge-ip-version is IPv6")
+		}
+		return allregions.IPv4Only, nil
+	} else {
+		if ipVersion == allregions.IPv4Only {
+			return allregions.IPv6Only, fmt.Errorf("IPv6 bind address is specified, but edge-ip-version is IPv4")
+		}
+		return allregions.IPv6Only, nil
+	}
 }
 
 func newPacketConfig(c *cli.Context, logger *zerolog.Logger) (*ingress.GlobalRouterConfig, error) {

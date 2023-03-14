@@ -67,6 +67,7 @@ type QUICConnection struct {
 func NewQUICConnection(
 	quicConfig *quic.Config,
 	edgeAddr net.Addr,
+	localAddr net.IP,
 	connIndex uint8,
 	tlsConfig *tls.Config,
 	orchestrator Orchestrator,
@@ -75,7 +76,7 @@ func NewQUICConnection(
 	logger *zerolog.Logger,
 	packetRouterConfig *ingress.GlobalRouterConfig,
 ) (*QUICConnection, error) {
-	udpConn, err := createUDPConnForConnIndex(connIndex, logger)
+	udpConn, err := createUDPConnForConnIndex(connIndex, localAddr, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -401,6 +402,7 @@ func (s *streamReadWriteAcker) AckConnection(tracePropagation string) error {
 // httpResponseAdapter translates responses written by the HTTP Proxy into ones that can be used in QUIC.
 type httpResponseAdapter struct {
 	*quicpogs.RequestServerStream
+	headers             http.Header
 	connectResponseSent bool
 }
 
@@ -423,6 +425,14 @@ func (hrw *httpResponseAdapter) WriteRespHeaders(status int, header http.Header)
 	}
 
 	return hrw.WriteConnectResponseData(nil, metadata...)
+}
+
+func (hrw *httpResponseAdapter) Header() http.Header {
+	return hrw.headers
+}
+
+func (hrw *httpResponseAdapter) WriteHeader(status int) {
+	hrw.WriteRespHeaders(status, hrw.headers)
 }
 
 func (hrw *httpResponseAdapter) WriteErrorResponse(err error) {
@@ -563,13 +573,17 @@ func (rp *muxerWrapper) Close() error {
 	return nil
 }
 
-func createUDPConnForConnIndex(connIndex uint8, logger *zerolog.Logger) (*net.UDPConn, error) {
+func createUDPConnForConnIndex(connIndex uint8, localIP net.IP, logger *zerolog.Logger) (*net.UDPConn, error) {
 	portMapMutex.Lock()
 	defer portMapMutex.Unlock()
 
+	if localIP == nil {
+		localIP = net.IPv4zero
+	}
+
 	// if port was not set yet, it will be zero, so bind will randomly allocate one.
 	if port, ok := portForConnIndex[connIndex]; ok {
-		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: port})
+		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localIP, Port: port})
 		// if there wasn't an error, or if port was 0 (independently of error or not, just return)
 		if err == nil {
 			return udpConn, nil
@@ -579,7 +593,7 @@ func createUDPConnForConnIndex(connIndex uint8, logger *zerolog.Logger) (*net.UD
 	}
 
 	// if we reached here, then there was an error or port as not been allocated it.
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localIP, Port: 0})
 	if err == nil {
 		udpAddr, ok := (udpConn.LocalAddr()).(*net.UDPAddr)
 		if !ok {
