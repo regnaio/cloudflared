@@ -19,8 +19,10 @@ import (
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
+	"github.com/cloudflare/cloudflared/features"
 	"github.com/cloudflare/cloudflared/h2mux"
 	"github.com/cloudflare/cloudflared/ingress"
+	"github.com/cloudflare/cloudflared/management"
 	"github.com/cloudflare/cloudflared/orchestration"
 	quicpogs "github.com/cloudflare/cloudflared/quic"
 	"github.com/cloudflare/cloudflared/retry"
@@ -31,13 +33,7 @@ import (
 )
 
 const (
-	dialTimeout              = 15 * time.Second
-	FeatureSerializedHeaders = "serialized_headers"
-	FeatureQuickReconnects   = "quick_reconnects"
-	FeatureAllowRemoteConfig = "allow_remote_config"
-	FeatureDatagramV2        = "support_datagram_v2"
-	FeaturePostQuantum       = "postquantum"
-	FeatureQUICSupportEOF    = "support_quic_eof"
+	dialTimeout = 15 * time.Second
 )
 
 type TunnelConfig struct {
@@ -111,11 +107,11 @@ func (c *TunnelConfig) connectionOptions(originLocalAddr string, numPreviousAtte
 }
 
 func (c *TunnelConfig) SupportedFeatures() []string {
-	features := []string{FeatureSerializedHeaders}
+	supported := []string{features.FeatureSerializedHeaders}
 	if c.NamedTunnel == nil {
-		features = append(features, FeatureQuickReconnects)
+		supported = append(supported, features.FeatureQuickReconnects)
 	}
-	return features
+	return supported
 }
 
 func StartTunnelDaemon(
@@ -243,6 +239,7 @@ func (e *EdgeTunnelServer) Serve(ctx context.Context, connIndex uint8, protocolF
 	}
 
 	logger := e.config.Log.With().
+		Int(management.EventTypeKey, int(management.Cloudflared)).
 		IPAddr(connection.LogFieldIPAddress, addr.UDP.IP).
 		Uint8(connection.LogFieldConnIndex, connIndex).
 		Logger()

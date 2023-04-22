@@ -18,6 +18,7 @@ import (
 	"github.com/cloudflare/cloudflared/cfio"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/ingress"
+	"github.com/cloudflare/cloudflared/management"
 	"github.com/cloudflare/cloudflared/stream"
 	"github.com/cloudflare/cloudflared/tracing"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
@@ -27,10 +28,12 @@ const (
 	// TagHeaderNamePrefix indicates a Cloudflared Warp Tag prefix that gets appended for warp traffic stream headers.
 	TagHeaderNamePrefix   = "Cf-Warp-Tag-"
 	LogFieldCFRay         = "cfRay"
+	LogFieldLBProbe       = "lbProbe"
 	LogFieldRule          = "ingressRule"
 	LogFieldOriginService = "originService"
 	LogFieldFlowID        = "flowID"
 	LogFieldConnIndex     = "connIndex"
+	LogFieldDestAddr      = "destAddr"
 
 	trailerHeaderName = "Trailer"
 )
@@ -39,6 +42,7 @@ const (
 type Proxy struct {
 	ingressRules ingress.Ingress
 	warpRouting  *ingress.WarpRoutingService
+	management   *ingress.ManagementService
 	tags         []tunnelpogs.Tag
 	log          *zerolog.Logger
 }
@@ -156,6 +160,9 @@ func (p *Proxy) ProxyHTTP(
 			return err
 		}
 		return nil
+	case ingress.HTTPLocalProxy:
+		p.proxyLocalRequest(originProxy, w, req, isWebsocket)
+		return nil
 	default:
 		return fmt.Errorf("Unrecognized service: %s, %t", rule.Service, originProxy)
 	}
@@ -181,14 +188,24 @@ func (p *Proxy) ProxyTCP(
 
 	tracedCtx := tracing.NewTracedContext(serveCtx, req.CfTraceID, p.log)
 
-	p.log.Debug().Str(LogFieldFlowID, req.FlowID).Uint8(LogFieldConnIndex, req.ConnIndex).Msg("tcp proxy stream started")
+	p.log.Debug().
+		Int(management.EventTypeKey, int(management.TCP)).
+		Str(LogFieldFlowID, req.FlowID).
+		Str(LogFieldDestAddr, req.Dest).
+		Uint8(LogFieldConnIndex, req.ConnIndex).
+		Msg("tcp proxy stream started")
 
 	if err := p.proxyStream(tracedCtx, rwa, req.Dest, p.warpRouting.Proxy); err != nil {
 		p.logRequestError(err, req.CFRay, req.FlowID, "", ingress.ServiceWarpRouting)
 		return err
 	}
 
-	p.log.Debug().Str(LogFieldFlowID, req.FlowID).Uint8(LogFieldConnIndex, req.ConnIndex).Msg("tcp proxy stream finished successfully")
+	p.log.Debug().
+		Int(management.EventTypeKey, int(management.TCP)).
+		Str(LogFieldFlowID, req.FlowID).
+		Str(LogFieldDestAddr, req.Dest).
+		Uint8(LogFieldConnIndex, req.ConnIndex).
+		Msg("tcp proxy stream finished successfully")
 
 	return nil
 }
@@ -318,6 +335,17 @@ func (p *Proxy) proxyStream(
 	return nil
 }
 
+func (p *Proxy) proxyLocalRequest(proxy ingress.HTTPLocalProxy, w connection.ResponseWriter, req *http.Request, isWebsocket bool) {
+	if isWebsocket {
+		// These headers are added since they are stripped off during an eyeball request to origintunneld, but they
+		// are required during the Handshake process of a WebSocket request.
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-Websocket-Version", "13")
+	}
+	proxy.ServeHTTP(w, req)
+}
+
 type bidirectionalStream struct {
 	reader io.Reader
 	writer io.Writer
@@ -340,7 +368,7 @@ func (p *Proxy) appendTagHeaders(r *http.Request) {
 type logFields struct {
 	cfRay     string
 	lbProbe   bool
-	rule      interface{}
+	rule      int
 	flowID    string
 	connIndex uint8
 }
@@ -354,45 +382,41 @@ func copyTrailers(w connection.ResponseWriter, response *http.Response) {
 }
 
 func (p *Proxy) logRequest(r *http.Request, fields logFields) {
+	log := p.log.With().Int(management.EventTypeKey, int(management.HTTP)).Logger()
+	event := log.Debug()
 	if fields.cfRay != "" {
-		p.log.Debug().Msgf("CF-RAY: %s %s %s %s", fields.cfRay, r.Method, r.URL, r.Proto)
-	} else if fields.lbProbe {
-		p.log.Debug().Msgf("CF-RAY: %s Load Balancer health check %s %s %s", fields.cfRay, r.Method, r.URL, r.Proto)
-	} else {
-		p.log.Debug().Msgf("All requests should have a CF-RAY header. Please open a support ticket with Cloudflare. %s %s %s ", r.Method, r.URL, r.Proto)
+		event = event.Str(LogFieldCFRay, fields.cfRay)
 	}
-	p.log.Debug().
-		Str("CF-RAY", fields.cfRay).
-		Str("Header", fmt.Sprintf("%+v", r.Header)).
+	if fields.lbProbe {
+		event = event.Bool(LogFieldLBProbe, fields.lbProbe)
+	}
+	if fields.cfRay == "" && !fields.lbProbe {
+		log.Debug().Msgf("All requests should have a CF-RAY header. Please open a support ticket with Cloudflare. %s %s %s ", r.Method, r.URL, r.Proto)
+	}
+	event.
+		Uint8(LogFieldConnIndex, fields.connIndex).
 		Str("host", r.Host).
 		Str("path", r.URL.Path).
-		Interface("rule", fields.rule).
-		Uint8(LogFieldConnIndex, fields.connIndex).
-		Msg("Inbound request")
-
-	if contentLen := r.ContentLength; contentLen == -1 {
-		p.log.Debug().Msgf("CF-RAY: %s Request Content length unknown", fields.cfRay)
-	} else {
-		p.log.Debug().Msgf("CF-RAY: %s Request content length %d", fields.cfRay, contentLen)
-	}
+		Interface(LogFieldRule, fields.rule).
+		Interface("headers", r.Header).
+		Int64("content-length", r.ContentLength).
+		Msgf("%s %s %s", r.Method, r.URL, r.Proto)
 }
 
 func (p *Proxy) logOriginResponse(resp *http.Response, fields logFields) {
 	responseByCode.WithLabelValues(strconv.Itoa(resp.StatusCode)).Inc()
+	event := p.log.Debug()
 	if fields.cfRay != "" {
-		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Status: %s served by ingress %d", fields.cfRay, resp.Status, fields.rule)
-	} else if fields.lbProbe {
-		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("Response to Load Balancer health check %s", resp.Status)
-	} else {
-		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("Status: %s served by ingress %v", resp.Status, fields.rule)
+		event = event.Str(LogFieldCFRay, fields.cfRay)
 	}
-	p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Response Headers %+v", fields.cfRay, resp.Header)
-
-	if contentLen := resp.ContentLength; contentLen == -1 {
-		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Response content length unknown", fields.cfRay)
-	} else {
-		p.log.Debug().Uint8(LogFieldConnIndex, fields.connIndex).Msgf("CF-RAY: %s Response content length %d", fields.cfRay, contentLen)
+	if fields.lbProbe {
+		event = event.Bool(LogFieldLBProbe, fields.lbProbe)
 	}
+	event.
+		Int(management.EventTypeKey, int(management.HTTP)).
+		Uint8(LogFieldConnIndex, fields.connIndex).
+		Int64("content-length", resp.ContentLength).
+		Msgf("%s", resp.Status)
 }
 
 func (p *Proxy) logRequestError(err error, cfRay string, flowID string, rule, service string) {
@@ -402,7 +426,9 @@ func (p *Proxy) logRequestError(err error, cfRay string, flowID string, rule, se
 		log = log.Str(LogFieldCFRay, cfRay)
 	}
 	if flowID != "" {
-		log = log.Str(LogFieldFlowID, flowID)
+		log = log.Str(LogFieldFlowID, flowID).Int(management.EventTypeKey, int(management.TCP))
+	} else {
+		log = log.Int(management.EventTypeKey, int(management.HTTP))
 	}
 	if rule != "" {
 		log = log.Str(LogFieldRule, rule)
@@ -410,7 +436,7 @@ func (p *Proxy) logRequestError(err error, cfRay string, flowID string, rule, se
 	if service != "" {
 		log = log.Str(LogFieldOriginService, service)
 	}
-	log.Msg("")
+	log.Send()
 }
 
 func getDestFromRule(rule *ingress.Rule, req *http.Request) (string, error) {

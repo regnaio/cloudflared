@@ -3,17 +3,14 @@ package tunnel
 import (
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
 	mathRand "math/rand"
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	homedir "github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
@@ -25,6 +22,7 @@ import (
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
+	"github.com/cloudflare/cloudflared/features"
 	"github.com/cloudflare/cloudflared/ingress"
 	"github.com/cloudflare/cloudflared/orchestration"
 	"github.com/cloudflare/cloudflared/supervisor"
@@ -32,7 +30,6 @@ import (
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 )
 
-const LogFieldOriginCertPath = "originCertPath"
 const secretValue = "*****"
 
 var (
@@ -40,23 +37,10 @@ var (
 	serviceUrl      = developerPortal + "/reference/service/"
 	argumentsUrl    = developerPortal + "/reference/arguments/"
 
-	secretFlags     = [2]*altsrc.StringFlag{credentialsContentsFlag, tunnelTokenFlag}
-	defaultFeatures = []string{supervisor.FeatureAllowRemoteConfig, supervisor.FeatureSerializedHeaders, supervisor.FeatureDatagramV2, supervisor.FeatureQUICSupportEOF}
+	secretFlags = [2]*altsrc.StringFlag{credentialsContentsFlag, tunnelTokenFlag}
 
 	configFlags = []string{"autoupdate-freq", "no-autoupdate", "retries", "protocol", "loglevel", "transport-loglevel", "origincert", "metrics", "metrics-update-freq", "edge-ip-version", "edge-bind-address"}
 )
-
-// returns the first path that contains a cert.pem file. If none of the DefaultConfigSearchDirectories
-// contains a cert.pem file, return empty string
-func findDefaultOriginCertPath() string {
-	for _, defaultConfigDir := range config.DefaultConfigSearchDirectories() {
-		originCertPath, _ := homedir.Expand(filepath.Join(defaultConfigDir, config.DefaultCredentialFile))
-		if ok, _ := config.FileExists(originCertPath); ok {
-			return originCertPath
-		}
-	}
-	return ""
-}
 
 func generateRandomClientID(log *zerolog.Logger) (string, error) {
 	u, err := uuid.NewRandom()
@@ -128,62 +112,6 @@ func dnsProxyStandAlone(c *cli.Context, namedTunnel *connection.NamedTunnelPrope
 			namedTunnel != nil) // named tunnel
 }
 
-func findOriginCert(originCertPath string, log *zerolog.Logger) (string, error) {
-	if originCertPath == "" {
-		log.Info().Msgf("Cannot determine default origin certificate path. No file %s in %v", config.DefaultCredentialFile, config.DefaultConfigSearchDirectories())
-		if isRunningFromTerminal() {
-			log.Error().Msgf("You need to specify the origin certificate path with --origincert option, or set TUNNEL_ORIGIN_CERT environment variable. See %s for more information.", argumentsUrl)
-			return "", fmt.Errorf("client didn't specify origincert path when running from terminal")
-		} else {
-			log.Error().Msgf("You need to specify the origin certificate path by specifying the origincert option in the configuration file, or set TUNNEL_ORIGIN_CERT environment variable. See %s for more information.", serviceUrl)
-			return "", fmt.Errorf("client didn't specify origincert path")
-		}
-	}
-	var err error
-	originCertPath, err = homedir.Expand(originCertPath)
-	if err != nil {
-		log.Err(err).Msgf("Cannot resolve origin certificate path")
-		return "", fmt.Errorf("cannot resolve path %s", originCertPath)
-	}
-	// Check that the user has acquired a certificate using the login command
-	ok, err := config.FileExists(originCertPath)
-	if err != nil {
-		log.Error().Err(err).Msgf("Cannot check if origin cert exists at path %s", originCertPath)
-		return "", fmt.Errorf("cannot check if origin cert exists at path %s", originCertPath)
-	}
-	if !ok {
-		log.Error().Msgf(`Cannot find a valid certificate for your origin at the path:
-
-    %s
-
-If the path above is wrong, specify the path with the -origincert option.
-If you don't have a certificate signed by Cloudflare, run the command:
-
-	%s login
-`, originCertPath, os.Args[0])
-		return "", fmt.Errorf("cannot find a valid certificate at the path %s", originCertPath)
-	}
-
-	return originCertPath, nil
-}
-
-func readOriginCert(originCertPath string) ([]byte, error) {
-	// Easier to send the certificate as []byte via RPC than decoding it at this point
-	originCert, err := ioutil.ReadFile(originCertPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read %s to load origin certificate", originCertPath)
-	}
-	return originCert, nil
-}
-
-func getOriginCert(originCertPath string, log *zerolog.Logger) ([]byte, error) {
-	if originCertPath, err := findOriginCert(originCertPath, log); err != nil {
-		return nil, err
-	} else {
-		return readOriginCert(originCertPath)
-	}
-}
-
 func prepareTunnelConfig(
 	c *cli.Context,
 	info *cliutil.BuildInfo,
@@ -216,13 +144,13 @@ func prepareTunnelConfig(
 		transportProtocol = connection.QUIC.String()
 	}
 
-	features := dedup(append(c.StringSlice("features"), defaultFeatures...))
+	clientFeatures := dedup(append(c.StringSlice("features"), features.DefaultFeatures...))
 	if needPQ {
-		features = append(features, supervisor.FeaturePostQuantum)
+		clientFeatures = append(clientFeatures, features.FeaturePostQuantum)
 	}
 	namedTunnel.Client = tunnelpogs.ClientInfo{
 		ClientID: clientID[:],
-		Features: features,
+		Features: clientFeatures,
 		Version:  info.Version(),
 		Arch:     info.OSArch(),
 	}

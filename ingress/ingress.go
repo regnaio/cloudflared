@@ -35,12 +35,21 @@ const (
 
 // FindMatchingRule returns the index of the Ingress Rule which matches the given
 // hostname and path. This function assumes the last rule matches everything,
-// which is the case if the rules were instantiated via the ingress#Validate method
+// which is the case if the rules were instantiated via the ingress#Validate method.
+//
+// Negative index rule signifies local cloudflared rules (not-user defined).
 func (ing Ingress) FindMatchingRule(hostname, path string) (*Rule, int) {
 	// The hostname might contain port. We only want to compare the host part with the rule
 	host, _, err := net.SplitHostPort(hostname)
 	if err == nil {
 		hostname = host
+	}
+	for i, rule := range ing.LocalRules {
+		if rule.Matches(hostname, path) {
+			// Local rule matches return a negative rule index to distiguish local rules from user-defined rules in logs
+			// Full range would be [-1 .. )
+			return &rule, -1 - i
+		}
 	}
 	for i, rule := range ing.Rules {
 		if rule.Matches(hostname, path) {
@@ -67,6 +76,9 @@ func matchHost(ruleHost, reqHost string) bool {
 
 // Ingress maps eyeball requests to origins.
 type Ingress struct {
+	// Set of ingress rules that are not added to remote config, e.g. management
+	LocalRules []Rule
+	// Rules that are provided by the user from remote or local configuration
 	Rules    []Rule              `json:"ingress"`
 	Defaults OriginRequestConfig `json:"originRequest"`
 }
@@ -82,7 +94,7 @@ func ParseIngress(conf *config.Configuration) (Ingress, error) {
 // ParseIngressFromConfigAndCLI will parse the configuration rules from config files for ingress
 // rules and then attempt to parse CLI for ingress rules.
 // Will always return at least one valid ingress rule. If none are provided by the user, the default
-// will be to return 502 status code for all incoming requests.
+// will be to return 503 status code for all incoming requests.
 func ParseIngressFromConfigAndCLI(conf *config.Configuration, c *cli.Context, log *zerolog.Logger) (Ingress, error) {
 	// Attempt to parse ingress rules from configuration
 	ingressRules, err := ParseIngress(conf)
@@ -98,7 +110,11 @@ func ParseIngressFromConfigAndCLI(conf *config.Configuration, c *cli.Context, lo
 	//   --bastion for ssh bastion service
 	ingressRules, err = parseCLIIngress(c, false)
 	if errors.Is(err, ErrNoIngressRulesCLI) {
-		log.Warn().Msgf(ErrNoIngressRulesCLI.Error())
+		// Only log a warning if the tunnel is not a remotely managed tunnel and the config
+		// will be loaded after connecting.
+		if !c.IsSet("token") {
+			log.Warn().Msgf(ErrNoIngressRulesCLI.Error())
+		}
 		return newDefaultOrigin(c, log), nil
 	}
 	if err != nil {
@@ -143,24 +159,6 @@ func newDefaultOrigin(c *cli.Context, log *zerolog.Logger) Ingress {
 		Defaults: defaults,
 	}
 	return ingress
-}
-
-// WarpRoutingService starts a tcp stream between the origin and requests from
-// warp clients.
-type WarpRoutingService struct {
-	Proxy StreamBasedOriginProxy
-}
-
-func NewWarpRoutingService(config WarpRoutingConfig) *WarpRoutingService {
-	svc := &rawTCPService{
-		name: ServiceWarpRouting,
-		dialer: net.Dialer{
-			Timeout:   config.ConnectTimeout.Duration,
-			KeepAlive: config.TCPKeepAlive.Duration,
-		},
-	}
-
-	return &WarpRoutingService{Proxy: svc}
 }
 
 // Get a single origin service from the CLI/config.
