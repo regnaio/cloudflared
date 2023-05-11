@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lucas-clemente/quic-go"
+	"github.com/quic-go/quic-go"
 )
 
 type SafeStreamCloser struct {
@@ -51,4 +51,8 @@ func (s *SafeStreamCloser) CloseWrite() error {
 	// reading.
 	// We can still read from this stream.
 	return s.stream.Close()
+}
+
+func (s *SafeStreamCloser) SetDeadline(deadline time.Time) error {
+	return s.stream.SetDeadline(deadline)
 }
