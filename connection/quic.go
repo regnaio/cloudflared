@@ -63,6 +63,8 @@ type QUICConnection struct {
 	controlStreamHandler ControlStreamHandler
 	connOptions          *tunnelpogs.ConnectionOptions
 	connIndex            uint8
+
+	udpUnregisterTimeout time.Duration
 }
 
 // NewQUICConnection returns a new instance of QUICConnection.
@@ -78,6 +80,7 @@ func NewQUICConnection(
 	controlStreamHandler ControlStreamHandler,
 	logger *zerolog.Logger,
 	packetRouterConfig *ingress.GlobalRouterConfig,
+	udpUnregisterTimeout time.Duration,
 ) (*QUICConnection, error) {
 	udpConn, err := createUDPConnForConnIndex(connIndex, localAddr, logger)
 	if err != nil {
@@ -112,6 +115,7 @@ func NewQUICConnection(
 		controlStreamHandler: controlStreamHandler,
 		connOptions:          connOptions,
 		connIndex:            connIndex,
+		udpUnregisterTimeout: udpUnregisterTimeout,
 	}, nil
 }
 
@@ -357,7 +361,7 @@ func (q *QUICConnection) serveUDPSession(session *datagramsession.Session, close
 // closeUDPSession first unregisters the session from session manager, then it tries to unregister from edge
 func (q *QUICConnection) closeUDPSession(ctx context.Context, sessionID uuid.UUID, message string) {
 	q.sessionManager.UnregisterSession(ctx, sessionID, message, false)
-	stream, err := q.session.OpenStream()
+	quicStream, err := q.session.OpenStream()
 	if err != nil {
 		// Log this at debug because this is not an error if session was closed due to lost connection
 		// with edge
@@ -367,7 +371,10 @@ func (q *QUICConnection) closeUDPSession(ctx context.Context, sessionID uuid.UUI
 			Msgf("Failed to open quic stream to unregister udp session with edge")
 		return
 	}
-	rpcClientStream, err := quicpogs.NewRPCClientStream(ctx, stream, q.logger)
+
+	stream := quicpogs.NewSafeStreamCloser(quicStream)
+	defer stream.Close()
+	rpcClientStream, err := quicpogs.NewRPCClientStream(ctx, stream, q.udpUnregisterTimeout, q.logger)
 	if err != nil {
 		// Log this at debug because this is not an error if session was closed due to lost connection
 		// with edge
@@ -375,6 +382,8 @@ func (q *QUICConnection) closeUDPSession(ctx context.Context, sessionID uuid.UUI
 			Msgf("Failed to open rpc stream to unregister udp session with edge")
 		return
 	}
+	defer rpcClientStream.Close()
+
 	if err := rpcClientStream.UnregisterUdpSession(ctx, sessionID, message); err != nil {
 		q.logger.Err(err).Str("sessionID", sessionID.String()).
 			Msgf("Failed to unregister udp session with edge")

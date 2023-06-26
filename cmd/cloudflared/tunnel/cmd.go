@@ -79,6 +79,9 @@ const (
 	// hostKeyPath is the path of the dir to save SSH host keys too
 	hostKeyPath = "host-key-path"
 
+	// udpUnregisterSessionTimeout is how long we wait before we stop trying to unregister a UDP session from the edge
+	udpUnregisterSessionTimeoutFlag = "udp-unregister-session-timeout"
+
 	// uiFlag is to enable launching cloudflared in interactive UI mode
 	uiFlag = "ui"
 
@@ -399,7 +402,7 @@ func StartServer(
 		}
 	}
 
-	localRules := []ingress.Rule{}
+	internalRules := []ingress.Rule{}
 	if features.Contains(features.FeatureManagementLogs) {
 		serviceIP := c.String("service-op-ip")
 		if edgeAddrs, err := edgediscovery.ResolveEdge(log, tunnelConfig.Region, tunnelConfig.EdgeIPVersion); err == nil {
@@ -416,9 +419,9 @@ func StartServer(
 			logger.ManagementLogger.Log,
 			logger.ManagementLogger,
 		)
-		localRules = []ingress.Rule{ingress.NewManagementRule(mgmt)}
+		internalRules = []ingress.Rule{ingress.NewManagementRule(mgmt)}
 	}
-	orchestrator, err := orchestration.NewOrchestrator(ctx, orchestratorConfig, tunnelConfig.Tags, localRules, tunnelConfig.Log)
+	orchestrator, err := orchestration.NewOrchestrator(ctx, orchestratorConfig, tunnelConfig.Tags, internalRules, tunnelConfig.Log)
 	if err != nil {
 		return err
 	}
@@ -681,6 +684,11 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 		altsrc.NewIntFlag(&cli.IntFlag{
 			Name:   haConnectionsFlag,
 			Value:  4,
+			Hidden: true,
+		}),
+		altsrc.NewDurationFlag(&cli.DurationFlag{
+			Name:   udpUnregisterSessionTimeoutFlag,
+			Value:  5 * time.Second,
 			Hidden: true,
 		}),
 		altsrc.NewStringFlag(&cli.StringFlag{
