@@ -59,10 +59,8 @@ func NewOriginProxy(
 		tags:         tags,
 		log:          log,
 	}
-	if warpRouting.Enabled {
-		proxy.warpRouting = ingress.NewWarpRoutingService(warpRouting)
-		log.Info().Msgf("Warp-routing is enabled")
-	}
+
+	proxy.warpRouting = ingress.NewWarpRoutingService(warpRouting)
 
 	return proxy
 }

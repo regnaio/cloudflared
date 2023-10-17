@@ -4,24 +4,23 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
+
+	"github.com/cloudflare/cloudflared/features"
 )
 
 // When experimental post-quantum tunnels are enabled, and we're hitting an
 // issue creating the tunnel, we'll report the first error
 // to https://pqtunnels.cloudflareresearch.com.
 
-var (
-	PQKexes = [...]tls.CurveID{
-		tls.CurveID(0xfe30), // X25519Kyber512Draft00
-		tls.CurveID(0xfe31), // X25519Kyber768Draft00
-	}
-	PQKexNames map[tls.CurveID]string = map[tls.CurveID]string{
-		tls.CurveID(0xfe30): "X25519Kyber512Draft00",
-		tls.CurveID(0xfe31): "X25519Kyber768Draft00",
-	}
+const (
+	PQKex     = tls.CurveID(0xfe31) // X25519Kyber768Draft00
+	PQKexName = "X25519Kyber768Draft00"
+)
 
+var (
 	pqtMux       sync.Mutex // protects pqtSubmitted and pqtWaitForMessage
 	pqtSubmitted bool       // whether an error has already been submitted
 
@@ -70,7 +69,7 @@ func submitPQTunnelError(rep error, config *TunnelConfig) {
 		Message string `json:"m"`
 		Version string `json:"v"`
 	}{
-		Group:   int(PQKexes[config.PQKexIdx]),
+		Group:   int(PQKex),
 		Message: rep.Error(),
 		Version: config.ReportedVersion,
 	})
@@ -97,4 +96,33 @@ func submitPQTunnelError(rep error, config *TunnelConfig) {
 		)
 	}
 	resp.Body.Close()
+}
+
+func curvePreference(pqMode features.PostQuantumMode, currentCurve []tls.CurveID) ([]tls.CurveID, error) {
+	switch pqMode {
+	case features.PostQuantumStrict:
+		// If the user passes the -post-quantum flag, we override
+		// CurvePreferences to only support hybrid post-quantum key agreements.
+		return []tls.CurveID{PQKex}, nil
+	case features.PostQuantumPrefer:
+		if len(currentCurve) == 0 {
+			return []tls.CurveID{PQKex}, nil
+		}
+
+		if currentCurve[0] != PQKex {
+			return append([]tls.CurveID{PQKex}, currentCurve...), nil
+		}
+		return currentCurve, nil
+	case features.PostQuantumDisabled:
+		curvePref := currentCurve
+		// Remove PQ from curve preference
+		for i, curve := range currentCurve {
+			if curve == PQKex {
+				curvePref = append(curvePref[:i], curvePref[i+1:]...)
+			}
+		}
+		return curvePref, nil
+	default:
+		return nil, fmt.Errorf("Unexpected post quantum mode")
+	}
 }
