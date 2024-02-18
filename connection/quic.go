@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -65,6 +66,7 @@ type QUICConnection struct {
 	connIndex            uint8
 
 	udpUnregisterTimeout time.Duration
+	streamWriteTimeout   time.Duration
 }
 
 // NewQUICConnection returns a new instance of QUICConnection.
@@ -81,6 +83,7 @@ func NewQUICConnection(
 	logger *zerolog.Logger,
 	packetRouterConfig *ingress.GlobalRouterConfig,
 	udpUnregisterTimeout time.Duration,
+	streamWriteTimeout time.Duration,
 ) (*QUICConnection, error) {
 	udpConn, err := createUDPConnForConnIndex(connIndex, localAddr, logger)
 	if err != nil {
@@ -116,6 +119,7 @@ func NewQUICConnection(
 		connOptions:          connOptions,
 		connIndex:            connIndex,
 		udpUnregisterTimeout: udpUnregisterTimeout,
+		streamWriteTimeout:   streamWriteTimeout,
 	}, nil
 }
 
@@ -194,7 +198,7 @@ func (q *QUICConnection) acceptStream(ctx context.Context) error {
 
 func (q *QUICConnection) runStream(quicStream quic.Stream) {
 	ctx := quicStream.Context()
-	stream := quicpogs.NewSafeStreamCloser(quicStream)
+	stream := quicpogs.NewSafeStreamCloser(quicStream, q.streamWriteTimeout, q.logger)
 	defer stream.Close()
 
 	// we are going to fuse readers/writers from stream <- cloudflared -> origin, and we want to guarantee that
@@ -372,7 +376,7 @@ func (q *QUICConnection) closeUDPSession(ctx context.Context, sessionID uuid.UUI
 		return
 	}
 
-	stream := quicpogs.NewSafeStreamCloser(quicStream)
+	stream := quicpogs.NewSafeStreamCloser(quicStream, q.streamWriteTimeout, q.logger)
 	defer stream.Close()
 	rpcClientStream, err := quicpogs.NewRPCClientStream(ctx, stream, q.udpUnregisterTimeout, q.logger)
 	if err != nil {
@@ -623,9 +627,19 @@ func createUDPConnForConnIndex(connIndex uint8, localIP net.IP, logger *zerolog.
 		localIP = net.IPv4zero
 	}
 
+	listenNetwork := "udp"
+	// https://github.com/quic-go/quic-go/issues/3793 DF bit cannot be set for dual stack listener on OSX
+	if runtime.GOOS == "darwin" {
+		if localIP.To4() != nil {
+			listenNetwork = "udp4"
+		} else {
+			listenNetwork = "udp6"
+		}
+	}
+
 	// if port was not set yet, it will be zero, so bind will randomly allocate one.
 	if port, ok := portForConnIndex[connIndex]; ok {
-		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localIP, Port: port})
+		udpConn, err := net.ListenUDP(listenNetwork, &net.UDPAddr{IP: localIP, Port: port})
 		// if there wasn't an error, or if port was 0 (independently of error or not, just return)
 		if err == nil {
 			return udpConn, nil
@@ -635,7 +649,7 @@ func createUDPConnForConnIndex(connIndex uint8, localIP net.IP, logger *zerolog.
 	}
 
 	// if we reached here, then there was an error or port as not been allocated it.
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localIP, Port: 0})
+	udpConn, err := net.ListenUDP(listenNetwork, &net.UDPAddr{IP: localIP, Port: 0})
 	if err == nil {
 		udpAddr, ok := (udpConn.LocalAddr()).(*net.UDPAddr)
 		if !ok {

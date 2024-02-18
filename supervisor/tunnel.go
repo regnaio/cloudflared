@@ -47,7 +47,6 @@ type TunnelConfig struct {
 	EdgeIPVersion      allregions.ConfigIPVersion
 	EdgeBindAddr       net.IP
 	HAConnections      int
-	IncidentLookup     IncidentLookup
 	IsAutoupdated      bool
 	LBPool             string
 	Tags               []tunnelpogs.Tag
@@ -67,6 +66,7 @@ type TunnelConfig struct {
 	PacketConfig     *ingress.GlobalRouterConfig
 
 	UDPUnregisterSessionTimeout time.Duration
+	WriteStreamTimeout          time.Duration
 
 	DisableQUICPathMTUDiscovery bool
 
@@ -436,9 +436,6 @@ func (e *EdgeTunnelServer) serveTunnel(
 			connLog.ConnAwareLogger().Err(err).Msg("Register tunnel error from server side")
 			// Don't send registration error return from server to Sentry. They are
 			// logged on server side
-			if incidents := e.config.IncidentLookup.ActiveIncidents(); len(incidents) > 0 {
-				connLog.ConnAwareLogger().Msg(activeIncidentsMsg(incidents))
-			}
 			return err.Cause, !err.Permanent
 		case *connection.EdgeQuicDialError:
 			return err, false
@@ -601,7 +598,6 @@ func (e *EdgeTunnelServer) serveQUIC(
 		MaxIncomingStreams:      quicpogs.MaxIncomingStreams,
 		MaxIncomingUniStreams:   quicpogs.MaxIncomingStreams,
 		EnableDatagrams:         true,
-		MaxDatagramFrameSize:    quicpogs.MaxDatagramFrameSize,
 		Tracer:                  quicpogs.NewClientTracer(connLogger.Logger(), connIndex),
 		DisablePathMTUDiscovery: e.config.DisableQUICPathMTUDiscovery,
 	}
@@ -619,12 +615,9 @@ func (e *EdgeTunnelServer) serveQUIC(
 		connLogger.Logger(),
 		e.config.PacketConfig,
 		e.config.UDPUnregisterSessionTimeout,
+		e.config.WriteStreamTimeout,
 	)
 	if err != nil {
-		if pqMode == features.PostQuantumStrict || pqMode == features.PostQuantumPrefer {
-			handlePQTunnelError(err, e.config)
-		}
-
 		connLogger.ConnAwareLogger().Err(err).Msgf("Failed to create new quic connection")
 		return err, true
 	}
@@ -674,17 +667,4 @@ func (cf *connectedFuse) Connected() {
 
 func (cf *connectedFuse) IsConnected() bool {
 	return cf.fuse.Value()
-}
-
-func activeIncidentsMsg(incidents []Incident) string {
-	preamble := "There is an active Cloudflare incident that may be related:"
-	if len(incidents) > 1 {
-		preamble = "There are active Cloudflare incidents that may be related:"
-	}
-	incidentStrings := []string{}
-	for _, incident := range incidents {
-		incidentString := fmt.Sprintf("%s (%s)", incident.Name, incident.URL())
-		incidentStrings = append(incidentStrings, incidentString)
-	}
-	return preamble + " " + strings.Join(incidentStrings, "; ")
 }

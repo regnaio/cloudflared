@@ -1,3 +1,60 @@
+2024.2.0
+- 2024-02-07 TUN-8224: Count and collect metrics on stream connect successes/errors
+
+2024.1.5
+- 2024-01-22 TUN-8176: Support ARM platforms that don't have an FPU or have it enabled in kernel
+- 2024-01-15 TUN-8158: Bring back commit e6537418859afcac29e56a39daa08bcabc09e048 and fixes infinite loop on linux when the socket is closed
+
+2024.1.4
+- 2024-01-19 Revert "TUN-8158: Add logging to confirm when ICMP reply is returned to the edge"
+
+2024.1.3
+- 2024-01-15 TUN-8161: Fix broken ARM build for armv6
+- 2024-01-15 TUN-8158: Add logging to confirm when ICMP reply is returned to the edge
+
+2024.1.2
+- 2024-01-11 TUN-8147: Disable ECN usage due to bugs in detecting if supported
+- 2024-01-11 TUN-8146: Fix export path for install-go command
+- 2024-01-11 TUN-8146: Fix Makefile targets should not be run in parallel and install-go script was missing shebang
+- 2024-01-10 TUN-8140: Remove homebrew scripts
+
+2024.1.1
+- 2024-01-10 TUN-8134: Revert installed prefix to /usr
+- 2024-01-09 TUN-8130: Fix path to install go for mac build
+- 2024-01-09 TUN-8129: Use the same build command between branch and release builds
+- 2024-01-09 TUN-8130: Install go tool chain in /tmp on build agents
+- 2024-01-09 TUN-8134: Install cloudflare go as part of make install
+- 2024-01-08 TUN-8118: Disable FIPS module to build with go-boring without CGO_ENABLED
+
+2024.1.0
+- 2024-01-01 TUN-7934: Update quic-go to a version that queues datagrams for better throughput and drops large datagram
+- 2023-12-20 TUN-8072: Need to set GOCACHE in mac go installation script
+- 2023-12-17 TUN-8072: Add script to download cloudflare go for Mac build agents
+- 2023-12-15 Fix nil pointer dereference segfault when passing "null" config json to cloudflared tunnel ingress validate (#1070)
+- 2023-12-15 configuration.go: fix developerPortal link (#960)
+- 2023-12-14 tunnelrpc/pogs: fix dropped test errors (#1106)
+- 2023-12-14 cmd/cloudflared/updater: fix dropped error (#1055)
+- 2023-12-14 use os.Executable to discover the path to cloudflared (#1040)
+- 2023-12-14 Remove extraneous `period` from Path Environment Variable (#1009)
+- 2023-12-14 Use CLI context when running tunnel (#597)
+- 2023-12-14 TUN-8066: Define scripts to build on Windows agents
+- 2023-12-11 TUN-8052: Update go to 1.21.5
+- 2023-12-07 TUN-7970: Default to enable post quantum encryption for quic transport
+- 2023-12-04 TUN-8006: Update quic-go to latest upstream
+- 2023-11-15 VULN-44842 Add a flag that allows users to not send the Access JWT to stdout
+- 2023-11-13 TUN-7965: Remove legacy incident status page check
+- 2023-11-13 AUTH-5682 Org token flow in Access logins should pass CF_AppSession cookie
+
+2023.10.0
+- 2023-10-06 TUN-7864: Document cloudflared versions support
+- 2023-10-03 CUSTESC-33731: Make rule match test report rule in 0-index base
+- 2023-09-22 TUN-7824: Fix usage of systemctl status to detect which services are installed
+- 2023-09-20 TUN-7813: Improve tunnel delete command to use cascade delete
+- 2023-09-20 TUN-7787: cloudflared only list ip routes targeted for cfd_tunnel
+- 2023-09-15 TUN-7787: Refactor cloudflared to use new route endpoints based on route IDs
+- 2023-09-08 TUN-7776: Remove warp-routing flag from cloudflared
+- 2023-09-05 TUN-7756: Clarify that QUIC is mandatory to support ICMP proxying
+
 2023.8.2
 - 2023-08-25 TUN-7700: Implement feature selector to determine if connections will prefer post quantum cryptography
 - 2023-08-22 TUN-7707: Use X25519Kyber768Draft00 curve when post-quantum feature is enabled
