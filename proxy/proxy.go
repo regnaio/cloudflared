@@ -102,17 +102,17 @@ func (p *Proxy) ProxyHTTP(
 	}
 
 	if rule.Location != "" {
-		fmt.Println(fmt.Sprintf("before: req.URL.Path: %s", req.URL.Path))
+		fmt.Printf("before: req.URL.Path: %s\n", req.URL.Path)
 
 		parts := strings.Split(req.URL.Path, "/")
-		// fmt.Println("parts:", parts)
+		fmt.Printf("parts: %s\n", parts)
 
 		if len(parts) > 1 {
 			parts[1] = rule.Location
 		}
 
 		req.URL.Path = path.Clean(strings.Join(parts, "/"))
-		fmt.Println(fmt.Sprintf("after: req.URL.Path: %s", req.URL.Path))
+		fmt.Printf("after: req.URL.Path: %s\n", req.URL.Path)
 	}
 
 	switch originProxy := rule.Service.(type) {
