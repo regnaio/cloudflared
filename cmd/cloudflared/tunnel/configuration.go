@@ -27,7 +27,7 @@ import (
 	"github.com/cloudflare/cloudflared/orchestration"
 	"github.com/cloudflare/cloudflared/supervisor"
 	"github.com/cloudflare/cloudflared/tlsconfig"
-	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
+	"github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 )
 
 const (
@@ -133,7 +133,7 @@ func prepareTunnelConfig(
 		log.Err(err).Msg("Tag parse failure")
 		return nil, nil, errors.Wrap(err, "Tag parse failure")
 	}
-	tags = append(tags, tunnelpogs.Tag{Name: "ID", Value: clientID.String()})
+	tags = append(tags, pogs.Tag{Name: "ID", Value: clientID.String()})
 
 	transportProtocol := c.String("protocol")
 
@@ -166,7 +166,7 @@ func prepareTunnelConfig(
 		)
 	}
 
-	namedTunnel.Client = tunnelpogs.ClientInfo{
+	namedTunnel.Client = pogs.ClientInfo{
 		ClientID: clientID[:],
 		Features: clientFeatures,
 		Version:  info.Version(),
@@ -246,7 +246,7 @@ func prepareTunnelConfig(
 		EdgeTLSConfigs:              edgeTLSConfigs,
 		FeatureSelector:             featureSelector,
 		MaxEdgeAddrRetries:          uint8(c.Int("max-edge-addr-retries")),
-		UDPUnregisterSessionTimeout: c.Duration(udpUnregisterSessionTimeoutFlag),
+		RPCTimeout:                  c.Duration(rpcTimeout),
 		WriteStreamTimeout:          c.Duration(writeStreamTimeout),
 		DisableQUICPathMTUDiscovery: c.Bool(quicDisablePathMTUDiscovery),
 	}

@@ -21,7 +21,7 @@ import (
 	"github.com/cloudflare/cloudflared/ingress"
 	"github.com/cloudflare/cloudflared/stream"
 	"github.com/cloudflare/cloudflared/tracing"
-	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
+	"github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 )
 
 const (
@@ -35,7 +35,7 @@ type Proxy struct {
 	ingressRules ingress.Ingress
 	warpRouting  *ingress.WarpRoutingService
 	management   *ingress.ManagementService
-	tags         []tunnelpogs.Tag
+	tags         []pogs.Tag
 	log          *zerolog.Logger
 }
 
@@ -43,7 +43,7 @@ type Proxy struct {
 func NewOriginProxy(
 	ingressRules ingress.Ingress,
 	warpRouting ingress.WarpRoutingConfig,
-	tags []tunnelpogs.Tag,
+	tags []pogs.Tag,
 	writeTimeout time.Duration,
 	log *zerolog.Logger,
 ) *Proxy {
