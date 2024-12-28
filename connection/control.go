@@ -6,25 +6,27 @@ import (
 	"net"
 	"time"
 
-	"github.com/rs/zerolog"
+	"github.com/pkg/errors"
 
 	"github.com/cloudflare/cloudflared/management"
+	"github.com/cloudflare/cloudflared/tunnelrpc"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 )
 
-// RPCClientFunc derives a named tunnel rpc client that can then be used to register and unregister connections.
-type RPCClientFunc func(context.Context, io.ReadWriteCloser, *zerolog.Logger) NamedTunnelRPCClient
+// registerClient derives a named tunnel rpc client that can then be used to register and unregister connections.
+type registerClientFunc func(context.Context, io.ReadWriteCloser, time.Duration) tunnelrpc.RegistrationClient
 
 type controlStream struct {
 	observer *Observer
 
-	connectedFuse         ConnectedFuse
-	namedTunnelProperties *NamedTunnelProperties
-	connIndex             uint8
-	edgeAddress           net.IP
-	protocol              Protocol
+	connectedFuse    ConnectedFuse
+	tunnelProperties *TunnelProperties
+	connIndex        uint8
+	edgeAddress      net.IP
+	protocol         Protocol
 
-	newRPCClientFunc RPCClientFunc
+	registerClientFunc registerClientFunc
+	registerTimeout    time.Duration
 
 	gracefulShutdownC <-chan struct{}
 	gracePeriod       time.Duration
@@ -47,27 +49,29 @@ type TunnelConfigJSONGetter interface {
 func NewControlStream(
 	observer *Observer,
 	connectedFuse ConnectedFuse,
-	namedTunnelConfig *NamedTunnelProperties,
+	tunnelProperties *TunnelProperties,
 	connIndex uint8,
 	edgeAddress net.IP,
-	newRPCClientFunc RPCClientFunc,
+	registerClientFunc registerClientFunc,
+	registerTimeout time.Duration,
 	gracefulShutdownC <-chan struct{},
 	gracePeriod time.Duration,
 	protocol Protocol,
 ) ControlStreamHandler {
-	if newRPCClientFunc == nil {
-		newRPCClientFunc = newRegistrationRPCClient
+	if registerClientFunc == nil {
+		registerClientFunc = tunnelrpc.NewRegistrationClient
 	}
 	return &controlStream{
-		observer:              observer,
-		connectedFuse:         connectedFuse,
-		namedTunnelProperties: namedTunnelConfig,
-		newRPCClientFunc:      newRPCClientFunc,
-		connIndex:             connIndex,
-		edgeAddress:           edgeAddress,
-		gracefulShutdownC:     gracefulShutdownC,
-		gracePeriod:           gracePeriod,
-		protocol:              protocol,
+		observer:           observer,
+		connectedFuse:      connectedFuse,
+		tunnelProperties:   tunnelProperties,
+		registerClientFunc: registerClientFunc,
+		registerTimeout:    registerTimeout,
+		connIndex:          connIndex,
+		edgeAddress:        edgeAddress,
+		gracefulShutdownC:  gracefulShutdownC,
+		gracePeriod:        gracePeriod,
+		protocol:           protocol,
 	}
 }
 
@@ -77,50 +81,69 @@ func (c *controlStream) ServeControlStream(
 	connOptions *tunnelpogs.ConnectionOptions,
 	tunnelConfigGetter TunnelConfigJSONGetter,
 ) error {
-	rpcClient := c.newRPCClientFunc(ctx, rw, c.observer.log)
+	registrationClient := c.registerClientFunc(ctx, rw, c.registerTimeout)
 
-	registrationDetails, err := rpcClient.RegisterConnection(ctx, c.namedTunnelProperties, connOptions, c.connIndex, c.edgeAddress, c.observer)
+	registrationDetails, err := registrationClient.RegisterConnection(
+		ctx,
+		c.tunnelProperties.Credentials.Auth(),
+		c.tunnelProperties.Credentials.TunnelID,
+		connOptions,
+		c.connIndex,
+		c.edgeAddress)
 	if err != nil {
-		rpcClient.Close()
-		return err
+		defer registrationClient.Close()
+		if err.Error() == DuplicateConnectionError {
+			c.observer.metrics.regFail.WithLabelValues("dup_edge_conn", "registerConnection").Inc()
+			return errDuplicationConnection
+		}
+		c.observer.metrics.regFail.WithLabelValues("server_error", "registerConnection").Inc()
+		return serverRegistrationErrorFromRPC(err)
 	}
+	c.observer.metrics.regSuccess.WithLabelValues("registerConnection").Inc()
 
 	c.observer.logConnected(registrationDetails.UUID, c.connIndex, registrationDetails.Location, c.edgeAddress, c.protocol)
-	c.observer.sendConnectedEvent(c.connIndex, c.protocol, registrationDetails.Location)
+	c.observer.sendConnectedEvent(c.connIndex, c.protocol, registrationDetails.Location, c.edgeAddress)
 	c.connectedFuse.Connected()
 
 	// if conn index is 0 and tunnel is not remotely managed, then send local ingress rules configuration
 	if c.connIndex == 0 && !registrationDetails.TunnelIsRemotelyManaged {
 		if tunnelConfig, err := tunnelConfigGetter.GetConfigJSON(); err == nil {
-			if err := rpcClient.SendLocalConfiguration(ctx, tunnelConfig, c.observer); err != nil {
+			if err := registrationClient.SendLocalConfiguration(ctx, tunnelConfig); err != nil {
+				c.observer.metrics.localConfigMetrics.pushesErrors.Inc()
 				c.observer.log.Err(err).Msg("unable to send local configuration")
 			}
+			c.observer.metrics.localConfigMetrics.pushes.Inc()
 		} else {
 			c.observer.log.Err(err).Msg("failed to obtain current configuration")
 		}
 	}
 
-	c.waitForUnregister(ctx, rpcClient)
-	return nil
+	return c.waitForUnregister(ctx, registrationClient)
 }
 
-func (c *controlStream) waitForUnregister(ctx context.Context, rpcClient NamedTunnelRPCClient) {
+func (c *controlStream) waitForUnregister(ctx context.Context, registrationClient tunnelrpc.RegistrationClient) error {
 	// wait for connection termination or start of graceful shutdown
-	defer rpcClient.Close()
+	defer registrationClient.Close()
+	var shutdownError error
 	select {
 	case <-ctx.Done():
+		shutdownError = ctx.Err()
 		break
 	case <-c.gracefulShutdownC:
 		c.stoppedGracefully = true
 	}
 
 	c.observer.sendUnregisteringEvent(c.connIndex)
-	rpcClient.GracefulShutdown(ctx, c.gracePeriod)
+	err := registrationClient.GracefulShutdown(ctx, c.gracePeriod)
+	if err != nil {
+		return errors.Wrap(err, "Error shutting down control stream")
+	}
 	c.observer.log.Info().
 		Int(management.EventTypeKey, int(management.Cloudflared)).
 		Uint8(LogFieldConnIndex, c.connIndex).
 		IPAddr(LogFieldIPAddress, c.edgeAddress).
 		Msg("Unregistered tunnel connection")
+	return shutdownError
 }
 
 func (c *controlStream) IsStopped() bool {

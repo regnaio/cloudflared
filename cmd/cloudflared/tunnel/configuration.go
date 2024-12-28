@@ -108,7 +108,7 @@ func isSecretEnvVar(key string) bool {
 	return false
 }
 
-func dnsProxyStandAlone(c *cli.Context, namedTunnel *connection.NamedTunnelProperties) bool {
+func dnsProxyStandAlone(c *cli.Context, namedTunnel *connection.TunnelProperties) bool {
 	return c.IsSet("proxy-dns") &&
 		!(c.IsSet("name") || // adhoc-named tunnel
 			c.IsSet(ingress.HelloWorldFlag) || // quick or named tunnel
@@ -121,7 +121,7 @@ func prepareTunnelConfig(
 	info *cliutil.BuildInfo,
 	log, logTransport *zerolog.Logger,
 	observer *connection.Observer,
-	namedTunnel *connection.NamedTunnelProperties,
+	namedTunnel *connection.TunnelProperties,
 ) (*supervisor.TunnelConfig, *orchestration.Config, error) {
 	clientID, err := uuid.NewRandom()
 	if err != nil {
@@ -239,22 +239,24 @@ func prepareTunnelConfig(
 		Observer:        observer,
 		ReportedVersion: info.Version(),
 		// Note TUN-3758 , we use Int because UInt is not supported with altsrc
-		Retries:                     uint(c.Int("retries")),
-		RunFromTerminal:             isRunningFromTerminal(),
-		NamedTunnel:                 namedTunnel,
-		ProtocolSelector:            protocolSelector,
-		EdgeTLSConfigs:              edgeTLSConfigs,
-		FeatureSelector:             featureSelector,
-		MaxEdgeAddrRetries:          uint8(c.Int("max-edge-addr-retries")),
-		RPCTimeout:                  c.Duration(rpcTimeout),
-		WriteStreamTimeout:          c.Duration(writeStreamTimeout),
-		DisableQUICPathMTUDiscovery: c.Bool(quicDisablePathMTUDiscovery),
+		Retries:                             uint(c.Int("retries")),
+		RunFromTerminal:                     isRunningFromTerminal(),
+		NamedTunnel:                         namedTunnel,
+		ProtocolSelector:                    protocolSelector,
+		EdgeTLSConfigs:                      edgeTLSConfigs,
+		FeatureSelector:                     featureSelector,
+		MaxEdgeAddrRetries:                  uint8(c.Int("max-edge-addr-retries")),
+		RPCTimeout:                          c.Duration(rpcTimeout),
+		WriteStreamTimeout:                  c.Duration(writeStreamTimeout),
+		DisableQUICPathMTUDiscovery:         c.Bool(quicDisablePathMTUDiscovery),
+		QUICConnectionLevelFlowControlLimit: c.Uint64(quicConnLevelFlowControlLimit),
+		QUICStreamLevelFlowControlLimit:     c.Uint64(quicStreamLevelFlowControlLimit),
 	}
-	packetConfig, err := newPacketConfig(c, log)
+	icmpRouter, err := newICMPRouter(c, log)
 	if err != nil {
 		log.Warn().Err(err).Msg("ICMP proxy feature is disabled")
 	} else {
-		tunnelConfig.PacketConfig = packetConfig
+		tunnelConfig.ICMPRouterServer = icmpRouter
 	}
 	orchestratorConfig := &orchestration.Config{
 		Ingress:            &ingressRules,
@@ -349,33 +351,39 @@ func adjustIPVersionByBindAddress(ipVersion allregions.ConfigIPVersion, ip net.I
 	}
 }
 
-func newPacketConfig(c *cli.Context, logger *zerolog.Logger) (*ingress.GlobalRouterConfig, error) {
+func newICMPRouter(c *cli.Context, logger *zerolog.Logger) (ingress.ICMPRouterServer, error) {
+	ipv4Src, ipv6Src, err := determineICMPSources(c, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	icmpRouter, err := ingress.NewICMPRouter(ipv4Src, ipv6Src, logger, icmpFunnelTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return icmpRouter, nil
+}
+
+func determineICMPSources(c *cli.Context, logger *zerolog.Logger) (netip.Addr, netip.Addr, error) {
 	ipv4Src, err := determineICMPv4Src(c.String("icmpv4-src"), logger)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to determine IPv4 source address for ICMP proxy")
+		return netip.Addr{}, netip.Addr{}, errors.Wrap(err, "failed to determine IPv4 source address for ICMP proxy")
 	}
+
 	logger.Info().Msgf("ICMP proxy will use %s as source for IPv4", ipv4Src)
 
 	ipv6Src, zone, err := determineICMPv6Src(c.String("icmpv6-src"), logger, ipv4Src)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to determine IPv6 source address for ICMP proxy")
+		return netip.Addr{}, netip.Addr{}, errors.Wrap(err, "failed to determine IPv6 source address for ICMP proxy")
 	}
+
 	if zone != "" {
 		logger.Info().Msgf("ICMP proxy will use %s in zone %s as source for IPv6", ipv6Src, zone)
 	} else {
 		logger.Info().Msgf("ICMP proxy will use %s as source for IPv6", ipv6Src)
 	}
 
-	icmpRouter, err := ingress.NewICMPRouter(ipv4Src, ipv6Src, zone, logger, icmpFunnelTimeout)
-	if err != nil {
-		return nil, err
-	}
-	return &ingress.GlobalRouterConfig{
-		ICMPRouter: icmpRouter,
-		IPv4Src:    ipv4Src,
-		IPv6Src:    ipv6Src,
-		Zone:       zone,
-	}, nil
+	return ipv4Src, ipv6Src, nil
 }
 
 func determineICMPv4Src(userDefinedSrc string, logger *zerolog.Logger) (netip.Addr, error) {
@@ -405,13 +413,12 @@ type interfaceIP struct {
 
 func determineICMPv6Src(userDefinedSrc string, logger *zerolog.Logger, ipv4Src netip.Addr) (addr netip.Addr, zone string, err error) {
 	if userDefinedSrc != "" {
-		userDefinedIP, zone, _ := strings.Cut(userDefinedSrc, "%")
-		addr, err := netip.ParseAddr(userDefinedIP)
+		addr, err := netip.ParseAddr(userDefinedSrc)
 		if err != nil {
 			return netip.Addr{}, "", err
 		}
 		if addr.Is6() {
-			return addr, zone, nil
+			return addr, addr.Zone(), nil
 		}
 		return netip.Addr{}, "", fmt.Errorf("expect IPv6, but %s is IPv4", userDefinedSrc)
 	}

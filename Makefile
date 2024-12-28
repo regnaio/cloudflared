@@ -30,6 +30,10 @@ ifdef PACKAGE_MANAGER
 	VERSION_FLAGS := $(VERSION_FLAGS) -X "github.com/cloudflare/cloudflared/cmd/cloudflared/updater.BuiltForPackageManager=$(PACKAGE_MANAGER)"
 endif
 
+ifdef CONTAINER_BUILD 
+	VERSION_FLAGS := $(VERSION_FLAGS) -X "github.com/cloudflare/cloudflared/metrics.Runtime=virtual"
+endif
+
 LINK_FLAGS :=
 ifeq ($(FIPS), true)
 	LINK_FLAGS := -linkmode=external -extldflags=-static $(LINK_FLAGS)
@@ -165,9 +169,17 @@ cover:
 	# Generate the HTML report that can be viewed from the browser in CI.
 	$Q go tool cover -html ".cover/c.out" -o .cover/all.html
 
-.PHONY: test-ssh-server
-test-ssh-server:
-	docker-compose -f ssh_server_tests/docker-compose.yml up
+.PHONY: fuzz
+fuzz:
+	@go test -fuzz=FuzzIPDecoder -fuzztime=600s ./packet
+	@go test -fuzz=FuzzICMPDecoder -fuzztime=600s ./packet
+	@go test -fuzz=FuzzSessionWrite -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzSessionServe -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzRegistrationDatagram -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzPayloadDatagram -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzRegistrationResponseDatagram -fuzztime=600s ./quic/v3
+	@go test -fuzz=FuzzNewIdentity -fuzztime=600s ./tracing
+	@go test -fuzz=FuzzNewAccessValidator -fuzztime=600s ./validation
 
 .PHONY: install-go
 install-go:
@@ -218,38 +230,18 @@ cloudflared-pkg: cloudflared cloudflared.1
 cloudflared-msi:
 	wixl --define Version=$(VERSION) --define Path=$(EXECUTABLE_PATH) --output cloudflared-$(VERSION)-$(TARGET_ARCH).msi cloudflared.wxs
 
-.PHONY: cloudflared-darwin-amd64.tgz
-cloudflared-darwin-amd64.tgz: cloudflared
-	tar czf cloudflared-darwin-amd64.tgz cloudflared
-	rm cloudflared
+.PHONY: github-release-dryrun
+github-release-dryrun:
+	python3 github_release.py --path $(PWD)/built_artifacts --release-version $(VERSION) --dry-run
 
 .PHONY: github-release
-github-release: cloudflared
-	python3 github_release.py --path $(EXECUTABLE_PATH) --release-version $(VERSION)
-
-.PHONY: github-release-built-pkgs
-github-release-built-pkgs:
+github-release:
 	python3 github_release.py --path $(PWD)/built_artifacts --release-version $(VERSION)
-
-.PHONY: release-pkgs-linux
-release-pkgs-linux:
-	python3 ./release_pkgs.py
-
-.PHONY: github-message
-github-message:
 	python3 github_message.py --release-version $(VERSION)
 
-.PHONY: github-mac-upload
-github-mac-upload:
-	python3 github_release.py --path artifacts/cloudflared-darwin-amd64.tgz --release-version $(VERSION) --name cloudflared-darwin-amd64.tgz
-	python3 github_release.py --path artifacts/cloudflared-amd64.pkg --release-version $(VERSION) --name cloudflared-amd64.pkg
-
-.PHONY: github-windows-upload
-github-windows-upload:
-	python3 github_release.py --path built_artifacts/cloudflared-windows-amd64.exe --release-version $(VERSION) --name cloudflared-windows-amd64.exe
-	python3 github_release.py --path built_artifacts/cloudflared-windows-amd64.msi --release-version $(VERSION) --name cloudflared-windows-amd64.msi
-	python3 github_release.py --path built_artifacts/cloudflared-windows-386.exe --release-version $(VERSION) --name cloudflared-windows-386.exe
-	python3 github_release.py --path built_artifacts/cloudflared-windows-386.msi --release-version $(VERSION) --name cloudflared-windows-386.msi
+.PHONY: r2-linux-release
+r2-linux-release:
+	python3 ./release_pkgs.py
 
 .PHONY: capnp
 capnp:
